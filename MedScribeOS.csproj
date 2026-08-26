@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>MedScribeOS</AssemblyName>
+    <RootNamespace>MedScribeOS</RootNamespace>
+  </PropertyGroup>
+
+  <!-- Having both UseWPF and UseWindowsForms enabled makes .NET auto-generate
+       implicit global usings for System.Windows.Forms and System.Drawing
+       across the WHOLE project - including WPF-only files that never touch
+       WinForms. That's the actual source of every "ambiguous reference"
+       error we've hit (TextBox, Timer, Button, Brush, MessageBox...).
+       Removing these two here fixes all of them at once, instead of aliasing
+       every colliding type name file by file. App.xaml.cs is the only file
+       that needs WinForms, and it already refers to it via its own explicit
+       "WinForms" alias, not through this implicit global using - so nothing
+       else breaks. -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- FlaUI wraps the raw UIA COM API with a much friendlier surface than
+         System.Windows.Automation - this is the .NET equivalent of the
+         'uiautomation' python package used in the prototype. -->
+    <PackageReference Include="FlaUI.Core" Version="4.0.0" />
+    <PackageReference Include="FlaUI.UIA3" Version="4.0.0" />
+    <!-- NAudio: captures microphone audio to a WAV file for the visit.
+         Replaces the browser's MediaRecorder API used in the extension. -->
+    <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
+
+</Project>
