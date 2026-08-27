@@ -71,17 +71,17 @@ public partial class TemplateEditorWindow : Window
             Background = (Brush)FindResource("BgCardBrush"),
             BorderBrush = (Brush)FindResource("BorderBrush2"),
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(10),
-            Padding = new Thickness(14),
-            Margin = new Thickness(0, 0, 0, 12),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(20),
+            Margin = new Thickness(0, 0, 0, 20),
         };
 
         var outer = new StackPanel();
 
         // header row: label + key + reorder/delete
-        var head = new Grid();
+        var head = new Grid { Margin = new Thickness(0, 0, 0, 6) };
         head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+        head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(170) });
         head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         var labelBox = LabeledBox("SECTION LABEL", section.Label, v => section.Label = v);
@@ -89,11 +89,11 @@ public partial class TemplateEditorWindow : Window
         head.Children.Add(labelBox);
 
         var keyBox = LabeledBox("KEY", section.SectionKey, v => section.SectionKey = v);
-        keyBox.Margin = new Thickness(10, 0, 0, 0);
+        keyBox.Margin = new Thickness(14, 0, 0, 0);
         Grid.SetColumn(keyBox, 1);
         head.Children.Add(keyBox);
 
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(10, 0, 0, 0) };
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(14, 0, 0, 0) };
         buttons.Children.Add(MiniButton("▲", enabled: index > 0, () => MoveSection(index, -1)));
         buttons.Children.Add(MiniButton("▼", enabled: index < _working.Sections.Count - 1, () => MoveSection(index, +1)));
         buttons.Children.Add(MiniButton("✕", enabled: true, () => { _working.Sections.RemoveAt(index); RebuildSections(); }));
@@ -102,8 +102,21 @@ public partial class TemplateEditorWindow : Window
 
         outer.Children.Add(head);
 
+        // column captions for the field rows below
+        var fieldHeader = new Grid { Margin = new Thickness(0, 20, 0, 6) };
+        fieldHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(220) });
+        fieldHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var capLabel = Caption("FIELD LABEL");
+        var capPrompt = Caption("PROMPT  ·  steers GPT-4o for this field (optional)");
+        capPrompt.Margin = new Thickness(14, 0, 0, 0);
+        Grid.SetColumn(capLabel, 0);
+        Grid.SetColumn(capPrompt, 1);
+        fieldHeader.Children.Add(capLabel);
+        fieldHeader.Children.Add(capPrompt);
+        if (section.Fields.Count > 0) outer.Children.Add(fieldHeader);
+
         // fields
-        var fieldsHost = new StackPanel { Margin = new Thickness(0, 12, 0, 0) };
+        var fieldsHost = new StackPanel();
         for (var f = 0; f < section.Fields.Count; f++)
             fieldsHost.Children.Add(BuildFieldRow(section, f));
         outer.Children.Add(fieldsHost);
@@ -113,8 +126,8 @@ public partial class TemplateEditorWindow : Window
             Content = "＋ Add Field",
             Style = (Style)FindResource("GhostButtonStyle"),
             HorizontalAlignment = HorizontalAlignment.Left,
-            Margin = new Thickness(0, 10, 0, 0),
-            FontSize = 11,
+            Margin = new Thickness(0, 14, 0, 0),
+            FontSize = 12,
         };
         addField.Click += (_, _) =>
         {
@@ -131,8 +144,8 @@ public partial class TemplateEditorWindow : Window
     {
         var field = section.Fields[fieldIndex];
 
-        var grid = new Grid { Margin = new Thickness(0, 0, 0, 6) };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+        var grid = new Grid { Margin = new Thickness(0, 0, 0, 12) };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(220) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
@@ -141,17 +154,31 @@ public partial class TemplateEditorWindow : Window
         grid.Children.Add(labelBox);
 
         var promptBox = MakeBox(field.Prompt ?? "", "Prompt that steers GPT-4o for this field (optional)", v => field.Prompt = v);
-        promptBox.Margin = new Thickness(8, 0, 0, 0);
+        promptBox.Margin = new Thickness(14, 0, 0, 0);
+        promptBox.TextWrapping = TextWrapping.Wrap;
+        promptBox.AcceptsReturn = true;
+        promptBox.MinHeight = 42;
+        promptBox.MaxHeight = 96;
+        promptBox.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
         Grid.SetColumn(promptBox, 1);
         grid.Children.Add(promptBox);
 
         var del = MiniButton("✕", enabled: true, () => { section.Fields.RemoveAt(fieldIndex); RebuildSections(); });
-        del.Margin = new Thickness(8, 0, 0, 0);
+        del.Margin = new Thickness(14, 0, 0, 0);
+        del.VerticalAlignment = VerticalAlignment.Top;
         Grid.SetColumn(del, 2);
         grid.Children.Add(del);
 
         return grid;
     }
+
+    private static TextBlock Caption(string text) => new()
+    {
+        Text = text,
+        Foreground = Brushes.Gray,
+        FontSize = 10,
+        FontWeight = FontWeights.Bold,
+    };
 
     private void MoveSection(int index, int delta)
     {
@@ -166,14 +193,21 @@ public partial class TemplateEditorWindow : Window
     private static StackPanel LabeledBox(string caption, string value, Action<string> onChanged)
     {
         var panel = new StackPanel();
-        panel.Children.Add(new TextBlock { Text = caption, Foreground = Brushes.Gray, FontSize = 10, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 3) });
+        panel.Children.Add(new TextBlock { Text = caption, Foreground = Brushes.Gray, FontSize = 10, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 5) });
         panel.Children.Add(MakeBox(value, "", onChanged));
         return panel;
     }
 
     private static TextBox MakeBox(string value, string tooltip, Action<string> onChanged)
     {
-        var box = new TextBox { Text = value, Height = 30, VerticalContentAlignment = VerticalAlignment.Center };
+        var box = new TextBox
+        {
+            Text = value,
+            MinHeight = 40,
+            FontSize = 13,
+            Padding = new Thickness(10, 8, 10, 8),
+            VerticalContentAlignment = VerticalAlignment.Center,
+        };
         if (!string.IsNullOrEmpty(tooltip)) box.ToolTip = tooltip;
         box.TextChanged += (_, _) => onChanged(box.Text);
         return box;
@@ -185,11 +219,11 @@ public partial class TemplateEditorWindow : Window
         {
             Content = glyph,
             Style = (Style)FindResource("GhostButtonStyle"),
-            Width = 34,
-            Height = 30,
-            Margin = new Thickness(4, 0, 0, 0),
+            Width = 40,
+            Height = 40,
+            Margin = new Thickness(6, 0, 0, 0),
             IsEnabled = enabled,
-            FontSize = 11,
+            FontSize = 12,
         };
         button.Click += (_, _) => onClick();
         return button;

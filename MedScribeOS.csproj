@@ -9,7 +9,13 @@
     <Nullable>enable</Nullable>
     <AssemblyName>MedScribeOS</AssemblyName>
     <RootNamespace>MedScribeOS</RootNamespace>
+    <ApplicationIcon>Assets\appicon.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <!-- Bundled so every Window (Icon=...) and the tray icon can load it via pack URI. -->
+  <ItemGroup>
+    <Resource Include="Assets\appicon.ico" />
+  </ItemGroup>
 
   <!-- Having both UseWPF and UseWindowsForms enabled makes .NET auto-generate
        implicit global usings for System.Windows.Forms and System.Drawing

@@ -26,7 +26,7 @@ public partial class App : System.Windows.Application
 
         _trayIcon = new WinForms.NotifyIcon
         {
-            Icon = System.Drawing.SystemIcons.Application,
+            Icon = LoadAppIcon(),
             Visible = true,
             Text = "MedScribeAI"
         };
@@ -73,6 +73,19 @@ public partial class App : System.Windows.Application
         _mainWindow.Show();
         _mainWindow.WindowState = WindowState.Normal;
         _mainWindow.Activate();
+    }
+
+    /// <summary>The bundled app icon for the tray; falls back to the generic system icon if the resource can't be read.</summary>
+    private static System.Drawing.Icon LoadAppIcon()
+    {
+        try
+        {
+            var uri = new Uri("pack://application:,,,/Assets/appicon.ico");
+            using var stream = System.Windows.Application.GetResourceStream(uri)?.Stream;
+            if (stream != null) return new System.Drawing.Icon(stream);
+        }
+        catch { /* fall through */ }
+        return System.Drawing.SystemIcons.Application;
     }
 
     // Closing the window (X button) just hides it instead of destroying it, so
