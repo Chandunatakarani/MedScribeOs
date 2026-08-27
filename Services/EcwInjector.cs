@@ -184,7 +184,16 @@ public static class EcwInjector
         var previousClipboard = TryGetClipboardText();
         try
         {
-            System.Windows.Clipboard.SetText(text);
+            try
+            {
+                System.Windows.Clipboard.SetText(text);
+            }
+            catch (Exception ex)
+            {
+                return new InjectResult(false,
+                    $"Couldn't put the text on the clipboard to paste it: {ex.Message}");
+            }
+
             Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_V);
 
             // SendInput queues the keystroke and returns immediately - it does

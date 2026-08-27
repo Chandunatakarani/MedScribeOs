@@ -1,15 +1,27 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using MedScribeOS.Models;
 
 namespace MedScribeOS.Services;
 
 public record ConversationTurn(string Speaker, string Text);
+
+/// <summary>
+/// Output of a template-driven extraction: section key -> (field key -> value).
+/// Shape is entirely determined by the <see cref="NoteTemplate"/> that was
+/// passed in, so a doctor's custom schema comes straight back out.
+/// </summary>
+public sealed class TemplateExtractionResult
+{
+    public Dictionary<string, Dictionary<string, string>> Sections { get; } = new();
+}
 
 public record HpiRosResult(
     Dictionary<string, string> Hpi,
@@ -355,6 +367,94 @@ public sealed class OpenAiClient
             Assessment: root.TryGetProperty("assessment", out var a) ? a.GetString() : null,
             Plan: root.TryGetProperty("plan", out var p) ? p.GetString() : null,
             AdditionalNotes: root.TryGetProperty("additional_notes", out var n) ? n.GetString() : null);
+    }
+
+    /// <summary>
+    /// Template-driven port of <see cref="ExtractHpiRosAsync"/>: instead of the
+    /// hardcoded HPI/ROS field list, the sections/fields (and each field's
+    /// "prompt" guidance) come from the doctor's chosen <see cref="NoteTemplate"/>,
+    /// and the model is told to answer in exactly that shape. This is the hook
+    /// the spec's requirement 4 asks for - the doctor's schema shapes the output
+    /// rather than whatever was compiled in.
+    /// </summary>
+    public async Task<TemplateExtractionResult> ExtractStructuredAsync(List<ConversationTurn> turns, NoteTemplate template)
+    {
+        var conversation = string.Join("\n", turns.Select(t => $"{t.Speaker}: {t.Text}"));
+
+        var templateLines = new List<string>();
+        var schemaSections = new List<string>();
+        foreach (var section in template.Sections)
+        {
+            templateLines.Add($"{section.Label} [{section.SectionKey}]:");
+            var pairs = new List<string>();
+            foreach (var field in section.Fields)
+            {
+                var hint = string.IsNullOrWhiteSpace(field.Prompt) ? "" : $" — {field.Prompt}";
+                templateLines.Add($"  - {field.Label} [{field.FieldKey}]{hint}");
+                pairs.Add($"\"{field.FieldKey}\": \"\"");
+            }
+            schemaSections.Add($"\"{section.SectionKey}\": {{ {string.Join(", ", pairs)} }}");
+        }
+
+        var schema = "{\n  \"sections\": {\n    " + string.Join(",\n    ", schemaSections) + "\n  }\n}";
+
+        var prompt = $$"""
+            You are a board-certified medical scribe. Extract structured clinical information from this doctor-patient conversation into EXACTLY the schema below - do not add, drop, or rename any key.
+
+            TEMPLATE (each field shows its key and guidance on what to capture):
+            {{string.Join("\n", templateLines)}}
+
+            CONVERSATION:
+            {{conversation}}
+
+            Return ONLY valid JSON in this exact shape (no markdown, no preamble):
+            {{schema}}
+
+            Use "Not discussed" for any field the conversation does not cover. Be concise and clinically accurate.
+            """;
+
+        var json = await ChatJsonAsync(prompt);
+        return ParseStructured(json, template);
+    }
+
+    private static TemplateExtractionResult ParseStructured(string json, NoteTemplate template)
+    {
+        var result = new TemplateExtractionResult();
+
+        JsonElement sectionsEl = default;
+        var haveSections = false;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            // Accept both { "sections": {...} } and a bare {...} of sections.
+            sectionsEl = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("sections", out var s) ? s : root;
+            haveSections = sectionsEl.ValueKind == JsonValueKind.Object;
+        }
+        catch (JsonException)
+        {
+            // fall through - every field defaults to "Not discussed" below
+        }
+
+        foreach (var section in template.Sections)
+        {
+            var map = new Dictionary<string, string>();
+            JsonElement secObj = default;
+            var haveSec = haveSections
+                          && sectionsEl.TryGetProperty(section.SectionKey, out secObj)
+                          && secObj.ValueKind == JsonValueKind.Object;
+
+            foreach (var field in section.Fields)
+            {
+                map[field.FieldKey] =
+                    haveSec && secObj.TryGetProperty(field.FieldKey, out var fv) && fv.ValueKind == JsonValueKind.String
+                        ? (fv.GetString() ?? "").Trim()
+                        : "Not discussed";
+            }
+            result.Sections[section.SectionKey] = map;
+        }
+
+        return result;
     }
 
     private static Dictionary<string, string> ParseStringDict(JsonElement root, string propertyName)

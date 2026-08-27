@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using MedScribeOS.Models;
 using MedScribeOS.Services;
 // Same WPF/WinForms overlap as DictationEngine.cs - pin TextBox to the WPF one.
 using TextBox = System.Windows.Controls.TextBox;
@@ -18,39 +20,16 @@ public partial class MainWindow : Window
     private readonly LivePreviewRecorder? _livePreview;
     private readonly LiveConversationTranscriber? _liveTranscriber;
 
+    private readonly ITemplateStore _templateStore = new JsonTemplateStore();
+    private readonly ISessionService _session = SessionService.Instance;
+
     private List<ConversationTurn> _turns = new();
-    private HpiRosResult? _hpiRos;
-    private readonly Dictionary<string, TextBox> _hpiBoxes = new();
-    private readonly Dictionary<string, TextBox> _rosBoxes = new();
 
-    private static readonly Dictionary<string, string> HpiLabels = new()
-    {
-        ["chief_complaint"] = "Chief Complaint",
-        ["onset"] = "Onset",
-        ["location"] = "Location",
-        ["duration"] = "Duration",
-        ["character"] = "Character",
-        ["severity"] = "Severity",
-        ["aggravating_factors"] = "Aggravating Factors",
-        ["relieving_factors"] = "Relieving Factors",
-        ["associated_symptoms"] = "Associated Symptoms",
-        ["prior_episodes"] = "Prior Episodes",
-        ["medications_tried"] = "Medications Tried",
-    };
-
-    private static readonly Dictionary<string, string> RosLabels = new()
-    {
-        ["constitutional"] = "Constitutional",
-        ["heent"] = "HEENT",
-        ["cardiovascular"] = "Cardiovascular",
-        ["respiratory"] = "Respiratory",
-        ["gastrointestinal"] = "GI",
-        ["genitourinary"] = "GU",
-        ["musculoskeletal"] = "Musculoskeletal",
-        ["neurological"] = "Neurological",
-        ["skin"] = "Skin",
-        ["psychiatric"] = "Psychiatric",
-    };
+    // Filled by Analyze; both are shaped by whichever template the doctor picked.
+    private NoteTemplate? _activeTemplate;
+    private TemplateExtractionResult? _extraction;
+    // section key -> (field key -> the editable TextBox showing that field)
+    private readonly Dictionary<string, Dictionary<string, TextBox>> _sectionBoxes = new();
 
     public MainWindow()
     {
@@ -69,11 +48,19 @@ public partial class MainWindow : Window
             _openAi = new OpenAiClient();
             _dictation = new DictationEngine(_openAi);
             _dictation.PhraseInjected += phrase => Dispatcher.Invoke(() => TxtLastPhrase.Text = phrase);
-            _dictation.ErrorOccurred += err => Dispatcher.Invoke(() => TxtLastPhrase.Text = $"[error] {err}");
+            _dictation.ErrorOccurred += err => Dispatcher.Invoke(() =>
+            {
+                TxtLastPhrase.Text = $"[error] {err}";
+                Notify.Error($"Dictation: {err}");
+            });
 
             _livePreview = new LivePreviewRecorder();
             _livePreview.LevelChanged += level => Dispatcher.Invoke(() => MicLevelBar.Value = level);
-            _livePreview.ErrorOccurred += err => Dispatcher.Invoke(() => TxtConvoStatus.Text = $"[mic error: {err}]");
+            _livePreview.ErrorOccurred += err => Dispatcher.Invoke(() =>
+            {
+                TxtConvoStatus.Text = $"[mic error: {err}]";
+                Notify.Error($"Microphone: {err}");
+            });
 
             _liveTranscriber = new LiveConversationTranscriber(_openAi);
             _liveTranscriber.TurnAdded += turn => Dispatcher.Invoke(() =>
@@ -82,16 +69,88 @@ public partial class MainWindow : Window
                 AppendLiveTurn(turn);
             });
             _liveTranscriber.ErrorOccurred += err => Dispatcher.Invoke(() =>
-                TxtConvoStatus.Text = $"[live transcription error: {err}]");
+            {
+                TxtConvoStatus.Text = $"[live transcription error: {err}]";
+                Notify.Error($"Live transcription: {err}");
+            });
         }
         catch (Exception ex)
         {
             MessageBox.Show(
                 $"OPENAI_API_KEY is not set, so Voice Analyzer and Voice Dictation won't work until it is.\n\n{ex.Message}",
                 "MedScribeAI - setup needed", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Notify.Error("OpenAI isn't configured - Voice Analyzer and Voice Dictation are disabled until an API key is set.");
         }
 
         UpdateEnrollmentUi();
+
+        var user = AuthService.CurrentUser;
+        if (user == null)
+        {
+            TxtCurrentUser.Text = "";
+        }
+        else
+        {
+            var display = string.IsNullOrWhiteSpace(user.Name) ? user.Mail : user.Name;
+            TxtCurrentUser.Text = display;
+            Notify.Success($"Signed in as {display}.");
+        }
+
+        LoadTemplatesIntoPicker();
+    }
+
+    // ── Note templates ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// (Re)fills the Voice Analyzer template picker from the signed-in doctor's
+    /// JSON file, pre-selecting their default. Called on load and whenever the
+    /// Templates manager closes.
+    /// </summary>
+    private void LoadTemplatesIntoPicker()
+    {
+        if (!_session.IsAuthenticated) return;
+
+        var previousId = (TemplatePicker.SelectedItem as NoteTemplate)?.TemplateId;
+        var file = _templateStore.Load(_session.DoctorId);
+        var templates = file.Templates
+            .OrderByDescending(t => t.IsDefault)
+            .ThenBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        TemplatePicker.ItemsSource = templates;
+        TemplatePicker.SelectedItem =
+            templates.FirstOrDefault(t => t.TemplateId == previousId)
+            ?? templates.FirstOrDefault(t => t.IsDefault)
+            ?? templates.FirstOrDefault();
+    }
+
+    private void TemplatePicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (TemplatePicker.SelectedItem is NoteTemplate t)
+        {
+            var fieldCount = t.Sections.Sum(s => s.Fields.Count);
+            TxtTemplateHint.Text = $"{t.Sections.Count} section(s), {fieldCount} field(s) — shapes the Analyze output.";
+        }
+        else
+        {
+            TxtTemplateHint.Text = "";
+        }
+    }
+
+    private void BtnTemplates_Click(object sender, RoutedEventArgs e)
+    {
+        new TemplateListWindow { Owner = this }.ShowDialog();
+        LoadTemplatesIntoPicker();
+    }
+
+    private void BtnSignOut_Click(object sender, RoutedEventArgs e)
+    {
+        if (MessageBox.Show(
+                "Sign out of MedScribeAI?",
+                "Sign out", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+            return;
+
+        (System.Windows.Application.Current as App)?.SignOut();
     }
 
     // ── Voice Analyzer: doctor voice enrollment ──────────────────────────────
@@ -113,10 +172,12 @@ public partial class MainWindow : Window
         {
             await DoctorVoiceEnrollment.RecordAsync(TimeSpan.FromSeconds(8));
             UpdateEnrollmentUi();
+            Notify.Success("Doctor voice enrolled - conversation turns will be labeled by voice match.");
         }
         catch (Exception ex)
         {
             TxtEnrollStatus.Text = $"Enrollment failed: {DescribeError(ex)}";
+            Notify.Error($"Voice enrollment failed: {DescribeError(ex)}");
         }
         finally
         {
@@ -151,6 +212,7 @@ public partial class MainWindow : Window
             MessageBox.Show(
                 "Enroll the doctor's voice first (one-time, ~8 seconds) so Voice Analyzer can tell Doctor and Patient apart by voice instead of guessing.",
                 "MedScribeAI - enrollment needed", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Notify.Warning("Enroll the doctor's voice before starting a conversation.");
             return;
         }
 
@@ -160,6 +222,7 @@ public partial class MainWindow : Window
         _liveTranscriber?.Start();
         BtnStartConvo.IsEnabled = false;
         BtnEndConvo.IsEnabled = true;
+        Notify.Info("Recording started - speak naturally.");
         TxtConvoStatus.Text = "🔴 Recording — speak naturally";
         TxtConvoStatus.Foreground = (Brush)FindResource("TextPrimaryBrush");
         MicLevelBar.Visibility = Visibility.Visible;
@@ -179,6 +242,7 @@ public partial class MainWindow : Window
         if (_liveTranscriber == null)
         {
             TxtConvoStatus.Text = "Nothing recorded, or OPENAI_API_KEY is missing.";
+            Notify.Error("Couldn't transcribe - OpenAI isn't configured. Set an API key and restart.");
             BtnStartConvo.IsEnabled = true;
             return;
         }
@@ -199,11 +263,17 @@ public partial class MainWindow : Window
                 : "No speech was detected during the recording.";
             TxtConvoStatus.Foreground = (Brush)FindResource("TextPrimaryBrush");
             PanelAnalyzeAction.Visibility = _turns.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+            if (_turns.Count > 0)
+                Notify.Success($"{_turns.Count} turns captured - review them, then Analyze.");
+            else
+                Notify.Warning("Recording stopped, but no speech was detected.");
         }
         catch (Exception ex)
         {
             TxtConvoStatus.Text = $"Error finishing transcription: {DescribeError(ex)}";
             TxtConvoStatus.Foreground = (Brush)FindResource("RedBrush");
+            Notify.Error($"Couldn't finish transcription: {DescribeError(ex)}");
         }
         finally
         {
@@ -291,21 +361,40 @@ public partial class MainWindow : Window
         return row;
     }
 
-    // ── Voice Analyzer: Analyze → HPI / ROS ──────────────────────────────────
+    // ── Voice Analyzer: Analyze → template sections ─────────────────────────
     private async void BtnAnalyze_Click(object sender, RoutedEventArgs e)
     {
-        if (_openAi == null || _turns.Count == 0) return;
+        if (_openAi == null)
+        {
+            Notify.Error("Can't analyze - OpenAI isn't configured. Set an API key and restart.");
+            return;
+        }
+        if (_turns.Count == 0)
+        {
+            Notify.Warning("Nothing to analyze yet - record a conversation first.");
+            return;
+        }
+
+        if (TemplatePicker.SelectedItem is not NoteTemplate template)
+        {
+            Notify.Warning("Pick a note template before analyzing.");
+            return;
+        }
+        _activeTemplate = template;
 
         BtnAnalyze.IsEnabled = false;
+        Notify.Info($"Analyzing conversation with the \"{template.Name}\" template…");
         try
         {
-            _hpiRos = await _openAi.ExtractHpiRosAsync(_turns);
-            RenderHpiRos();
+            _extraction = await _openAi.ExtractStructuredAsync(_turns, template);
+            RenderExtraction();
             PanelHpiRos.Visibility = Visibility.Visible;
+            Notify.Success($"\"{template.Name}\" draft ready - review every field before injecting.");
         }
         catch (Exception ex)
         {
             MessageBox.Show($"Analysis failed: {DescribeError(ex)}", "MedScribeAI", MessageBoxButton.OK, MessageBoxImage.Error);
+            Notify.Error($"Analysis failed: {DescribeError(ex)}");
         }
         finally
         {
@@ -326,24 +415,92 @@ public partial class MainWindow : Window
             : ex.Message;
     }
 
-    private void RenderHpiRos()
+    /// <summary>
+    /// Builds the Doctor Review panel from the active template: one labelled
+    /// block per section, an editable box per field pre-filled with the model's
+    /// value, and a per-section action button. HPI and ROS keep their eCW-aware
+    /// injectors; any other (custom) section gets a "copy to clipboard" action
+    /// since eCW has no known automation target for it.
+    /// </summary>
+    private void RenderExtraction()
     {
-        if (_hpiRos == null) return;
+        TemplateResultPanel.Children.Clear();
+        _sectionBoxes.Clear();
+        if (_activeTemplate == null || _extraction == null) return;
 
-        HpiFieldsPanel.Children.Clear();
-        _hpiBoxes.Clear();
-        foreach (var (key, label) in HpiLabels)
+        TxtReviewHeader.Text = $"⚕️ Doctor Review — \"{_activeTemplate.Name}\" — all fields editable before injecting";
+
+        foreach (var section in _activeTemplate.Sections)
         {
-            _hpiRos.Hpi.TryGetValue(key, out var value);
-            HpiFieldsPanel.Children.Add(BuildFieldRow(label, value ?? "Not discussed", key, _hpiBoxes));
+            TemplateResultPanel.Children.Add(new TextBlock
+            {
+                Text = section.Label.ToUpperInvariant(),
+                Style = (Style)FindResource("LabelStyle"),
+                Margin = new Thickness(0, 14, 0, 6),
+            });
+
+            var boxes = new Dictionary<string, TextBox>();
+            _extraction.Sections.TryGetValue(section.SectionKey, out var values);
+
+            foreach (var field in section.Fields)
+            {
+                var value = values != null && values.TryGetValue(field.FieldKey, out var v) ? v : "Not discussed";
+                TemplateResultPanel.Children.Add(BuildFieldRow(field.Label, value, field.FieldKey, boxes));
+            }
+            _sectionBoxes[section.SectionKey] = boxes;
+
+            var injectButton = new Button
+            {
+                Content = InjectVerbFor(section),
+                Style = (Style)FindResource(IsEcwSection(section) ? "PrimaryButtonStyle" : "GhostButtonStyle"),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Margin = new Thickness(0, 8, 0, 4),
+            };
+            var captured = section;
+            injectButton.Click += (_, _) => InjectSection(captured);
+            TemplateResultPanel.Children.Add(injectButton);
+        }
+    }
+
+    private static bool IsEcwSection(TemplateSection section) =>
+        section.SectionKey.Equals("HPI", StringComparison.OrdinalIgnoreCase) ||
+        section.SectionKey.Equals("ROS", StringComparison.OrdinalIgnoreCase);
+
+    private static string InjectVerbFor(TemplateSection section) => section.SectionKey.ToUpperInvariant() switch
+    {
+        "HPI" => "⚡ Inject HPI (into focused problem's box)",
+        "ROS" => "⚡ Inject ROS",
+        _ => $"⧉ Copy {section.Label} to clipboard",
+    };
+
+    private void InjectSection(TemplateSection section)
+    {
+        var text = BuildSectionText(section);
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            Notify.Warning($"{section.Label} has nothing to inject - every field is empty or \"Not discussed\".");
+            return;
         }
 
-        RosFieldsPanel.Children.Clear();
-        _rosBoxes.Clear();
-        foreach (var (key, label) in RosLabels)
+        var result = section.SectionKey.ToUpperInvariant() switch
         {
-            _hpiRos.Ros.TryGetValue(key, out var value);
-            RosFieldsPanel.Children.Add(BuildFieldRow(label, value ?? "Not discussed", key, _rosBoxes));
+            "ROS" => EcwInjector.TryInjectIntoRos(text),
+            "HPI" => EcwInjector.TryInjectIntoFocusedHpi(text),
+            _ => CopyToClipboard(text),
+        };
+        ReportInjection(section.Label, result);
+    }
+
+    private static EcwInjector.InjectResult CopyToClipboard(string text)
+    {
+        try
+        {
+            System.Windows.Clipboard.SetText(text);
+            return new EcwInjector.InjectResult(true, "Copied to the clipboard - paste it into the right eCW field with Ctrl+V.");
+        }
+        catch (Exception ex)
+        {
+            return new EcwInjector.InjectResult(false, $"Couldn't copy to the clipboard: {ex.Message}");
         }
     }
 
@@ -357,29 +514,30 @@ public partial class MainWindow : Window
         return panel;
     }
 
-    // ── Voice Analyzer: Inject buttons ───────────────────────────────────────
-    private void BtnInjectRos_Click(object sender, RoutedEventArgs e)
+    private void ReportInjection(string section, EcwInjector.InjectResult result)
     {
-        var result = EcwInjector.TryInjectIntoRos(BuildFieldText(RosLabels, _rosBoxes));
         TxtInjectStatus.Text = result.Message;
         TxtInjectStatus.Foreground = (Brush)FindResource(result.Success ? "TextPrimaryBrush" : "RedBrush");
+
+        if (result.Success)
+            Notify.Success($"{section}: {result.Message}");
+        else
+            Notify.Error($"{section} not injected: {result.Message}");
     }
 
-    private void BtnInjectHpi_Click(object sender, RoutedEventArgs e)
+    /// <summary>"Label: value" lines for a section, skipping empty / "Not discussed" fields, read live from the editable boxes.</summary>
+    private string BuildSectionText(TemplateSection section)
     {
-        var result = EcwInjector.TryInjectIntoFocusedHpi(BuildFieldText(HpiLabels, _hpiBoxes));
-        TxtInjectStatus.Text = result.Message;
-        TxtInjectStatus.Foreground = (Brush)FindResource(result.Success ? "TextPrimaryBrush" : "RedBrush");
-    }
+        if (!_sectionBoxes.TryGetValue(section.SectionKey, out var boxes)) return "";
 
-    private static string BuildFieldText(Dictionary<string, string> labels, Dictionary<string, TextBox> boxes)
-    {
         var lines = new List<string>();
-        foreach (var (key, label) in labels)
+        foreach (var field in section.Fields)
         {
-            if (boxes.TryGetValue(key, out var box) && !string.IsNullOrWhiteSpace(box.Text) && box.Text != "Not discussed")
+            if (boxes.TryGetValue(field.FieldKey, out var box)
+                && !string.IsNullOrWhiteSpace(box.Text)
+                && !box.Text.Trim().Equals("Not discussed", StringComparison.OrdinalIgnoreCase))
             {
-                lines.Add($"{label}: {box.Text}");
+                lines.Add($"{field.Label}: {box.Text.Trim()}");
             }
         }
         return string.Join("\n", lines);
@@ -388,17 +546,23 @@ public partial class MainWindow : Window
     // ── Voice Dictation tab ──────────────────────────────────────────────────
     private void MicCircle_Click(object sender, MouseButtonEventArgs e)
     {
-        if (_dictation == null) return;
+        if (_dictation == null)
+        {
+            Notify.Error("Voice Dictation is unavailable - OpenAI isn't configured.");
+            return;
+        }
 
         if (_dictation.IsRunning)
         {
             _dictation.Stop();
             SetMicVisual(false);
+            Notify.Info("Dictation OFF.");
         }
         else
         {
             _dictation.Start();
             SetMicVisual(true);
+            Notify.Info("Dictation ON - click into an eCW field and speak.");
         }
     }
 

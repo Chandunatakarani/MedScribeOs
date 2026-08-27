@@ -1,0 +1,48 @@
+<Window x:Class="MedScribeOS.TemplateEditorWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Edit Template · MedScribeAI"
+        Height="720" Width="720"
+        Background="{StaticResource BgDarkBrush}"
+        WindowStartupLocation="CenterOwner"
+        FontFamily="Segoe UI">
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" x:Name="HeaderText" Text="Edit Template"
+                   Foreground="{StaticResource TextPrimaryBrush}" FontSize="20" FontWeight="Bold"/>
+
+        <StackPanel Grid.Row="1" Margin="0,16,0,0">
+            <TextBlock Text="TEMPLATE NAME" Style="{StaticResource LabelStyle}" Margin="0,0,0,6"/>
+            <TextBox x:Name="NameBox" Height="34" VerticalContentAlignment="Center"/>
+        </StackPanel>
+
+        <DockPanel Grid.Row="2" Margin="0,18,0,8" LastChildFill="False">
+            <TextBlock Text="SECTIONS" Style="{StaticResource LabelStyle}" DockPanel.Dock="Left" VerticalAlignment="Center"/>
+            <Button x:Name="BtnAddSection" Content="＋ Add Section" Style="{StaticResource GhostButtonStyle}"
+                    DockPanel.Dock="Right" Click="BtnAddSection_Click"/>
+        </DockPanel>
+
+        <ScrollViewer Grid.Row="3" VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="SectionsPanel"/>
+        </ScrollViewer>
+
+        <TextBlock Grid.Row="4" x:Name="ValidationText" Margin="0,10,0,0"
+                   Foreground="{StaticResource RedBrush}" TextWrapping="Wrap" FontSize="12"
+                   Visibility="Collapsed"/>
+
+        <DockPanel Grid.Row="5" Margin="0,14,0,0" LastChildFill="False">
+            <Button x:Name="BtnCancel" Content="Cancel" Style="{StaticResource GhostButtonStyle}"
+                    DockPanel.Dock="Right" Click="BtnCancel_Click"/>
+            <Button x:Name="BtnSave" Content="Save Template" Style="{StaticResource PrimaryButtonStyle}"
+                    DockPanel.Dock="Right" Margin="0,0,10,0" Click="BtnSave_Click"/>
+        </DockPanel>
+    </Grid>
+</Window>
