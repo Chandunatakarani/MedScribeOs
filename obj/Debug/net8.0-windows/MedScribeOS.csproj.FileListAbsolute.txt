@@ -82,3 +82,10 @@ C:\Users\A\MedScribeOs\obj\Debug\net8.0-windows\TemplateEditorWindow.baml
 C:\Users\A\MedScribeOs\obj\Debug\net8.0-windows\TemplateListWindow.baml
 C:\Users\A\MedScribeOs\obj\Debug\net8.0-windows\TemplateEditorWindow.g.cs
 C:\Users\A\MedScribeOs\obj\Debug\net8.0-windows\TemplateListWindow.g.cs
+C:\Users\A\MedScribeOs\bin\Debug\net8.0-windows\UglyToad.PdfPig.Core.dll
+C:\Users\A\MedScribeOs\bin\Debug\net8.0-windows\UglyToad.PdfPig.DocumentLayoutAnalysis.dll
+C:\Users\A\MedScribeOs\bin\Debug\net8.0-windows\UglyToad.PdfPig.Fonts.dll
+C:\Users\A\MedScribeOs\bin\Debug\net8.0-windows\UglyToad.PdfPig.Package.dll
+C:\Users\A\MedScribeOs\bin\Debug\net8.0-windows\UglyToad.PdfPig.Tokenization.dll
+C:\Users\A\MedScribeOs\bin\Debug\net8.0-windows\UglyToad.PdfPig.Tokens.dll
+C:\Users\A\MedScribeOs\bin\Debug\net8.0-windows\UglyToad.PdfPig.dll

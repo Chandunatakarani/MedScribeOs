@@ -107,23 +107,29 @@ public partial class MainWindow : Window
     // ── Note templates ─────────────────────────────────────────────────────
 
     /// <summary>
-    /// (Re)fills the Voice Analyzer template picker from the signed-in doctor's
-    /// JSON file, pre-selecting their default. Called on load and whenever the
-    /// Templates manager closes.
+    /// (Re)fills both template pickers (Voice Analyzer + File Analyzer) from the
+    /// signed-in doctor's JSON file, pre-selecting their default. Called on load
+    /// and whenever the Templates manager closes.
     /// </summary>
     private void LoadTemplatesIntoPicker()
     {
         if (!_session.IsAuthenticated) return;
 
-        var previousId = (TemplatePicker.SelectedItem as NoteTemplate)?.TemplateId;
         var file = _templateStore.Load(_session.DoctorId);
         var templates = file.Templates
             .OrderByDescending(t => t.IsDefault)
             .ThenBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        TemplatePicker.ItemsSource = templates;
-        TemplatePicker.SelectedItem =
+        FillPicker(TemplatePicker, templates);
+        FillPicker(FileTemplatePicker, templates);
+    }
+
+    private static void FillPicker(ComboBox picker, List<NoteTemplate> templates)
+    {
+        var previousId = (picker.SelectedItem as NoteTemplate)?.TemplateId;
+        picker.ItemsSource = templates;
+        picker.SelectedItem =
             templates.FirstOrDefault(t => t.TemplateId == previousId)
             ?? templates.FirstOrDefault(t => t.IsDefault)
             ?? templates.FirstOrDefault();
@@ -207,6 +213,115 @@ public partial class MainWindow : Window
         PanelVoiceDictation.Visibility = Visibility.Collapsed;
         PanelFileAnalyzer.Visibility = Visibility.Collapsed;
         panel.Visibility = Visibility.Visible;
+
+        // The shared review panel belongs to whichever tab last analyzed - hide
+        // it on any tab switch so it can't dangle under an unrelated screen.
+        if (PanelHpiRos != null) PanelHpiRos.Visibility = Visibility.Collapsed;
+    }
+
+    // ── File Analyzer: load a file, then run the same extraction ─────────────
+    private async void BtnChooseFile_Click(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Choose a transcript, recording, or document",
+            Filter = "All supported (*.txt;*.wav;*.mp3;*.m4a;*.pdf;*.docx)|*.txt;*.wav;*.mp3;*.m4a;*.pdf;*.docx|" +
+                     "Text transcript (*.txt)|*.txt|" +
+                     "Audio recording (*.wav;*.mp3;*.m4a)|*.wav;*.mp3;*.m4a|" +
+                     "Document (*.pdf;*.docx)|*.pdf;*.docx",
+        };
+        if (dlg.ShowDialog() != true) return;
+
+        var path = dlg.FileName;
+        BtnChooseFile.IsEnabled = false;
+        BtnFileAnalyze.IsEnabled = false;
+        try
+        {
+            string text;
+            if (DocumentText.IsAudio(path))
+            {
+                if (_openAi == null) { Notify.Error("Transcription isn't configured (see config.json)."); return; }
+                TxtFileStatus.Text = "Transcribing audio… long recordings can take a few minutes.";
+                Notify.Info("Transcribing the recording…");
+                text = await _openAi.TranscribeAsync(path);
+            }
+            else if (DocumentText.IsDocument(path))
+            {
+                TxtFileStatus.Text = "Reading file…";
+                text = await Task.Run(() => DocumentText.FromFile(path));
+            }
+            else
+            {
+                Notify.Warning("Unsupported file type. Use .txt, .wav/.mp3/.m4a, or .pdf/.docx.");
+                return;
+            }
+
+            text = text.Trim();
+            TxtFileTranscript.Text = text;
+            TxtFileName.Text = System.IO.Path.GetFileName(path);
+
+            if (text.Length == 0)
+            {
+                TxtFileStatus.Text = "That file produced no text. If it's a scanned PDF, it has no selectable text to read.";
+                Notify.Warning("No readable text found in that file.");
+            }
+            else
+            {
+                TxtFileStatus.Text = $"Loaded {text.Length:N0} characters. Review the transcript, pick a template, then Analyze.";
+                Notify.Success($"Loaded {System.IO.Path.GetFileName(path)}.");
+            }
+        }
+        catch (Exception ex)
+        {
+            TxtFileStatus.Text = $"Couldn't load that file: {DescribeError(ex)}";
+            Notify.Error($"Couldn't load the file: {DescribeError(ex)}");
+        }
+        finally
+        {
+            BtnChooseFile.IsEnabled = true;
+            BtnFileAnalyze.IsEnabled = true;
+        }
+    }
+
+    private async void BtnFileAnalyze_Click(object sender, RoutedEventArgs e)
+    {
+        if (_openAi == null)
+        {
+            Notify.Error("Can't analyze - the AI provider isn't configured (see config.json).");
+            return;
+        }
+
+        var text = TxtFileTranscript.Text?.Trim() ?? "";
+        if (text.Length == 0)
+        {
+            Notify.Warning("Load a file or paste a transcript first.");
+            return;
+        }
+        if (FileTemplatePicker.SelectedItem is not NoteTemplate template)
+        {
+            Notify.Warning("Pick a note template first.");
+            return;
+        }
+        _activeTemplate = template;
+
+        BtnFileAnalyze.IsEnabled = false;
+        Notify.Info($"Analyzing with the \"{template.Name}\" template…");
+        try
+        {
+            _extraction = await _openAi.ExtractStructuredFromTextAsync(text, template);
+            RenderExtraction();
+            PanelHpiRos.Visibility = Visibility.Visible;
+            Notify.Success($"\"{template.Name}\" draft ready - review every field before injecting.");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Analysis failed: {DescribeError(ex)}", "MedScribeAI", MessageBoxButton.OK, MessageBoxImage.Error);
+            Notify.Error($"Analysis failed: {DescribeError(ex)}");
+        }
+        finally
+        {
+            BtnFileAnalyze.IsEnabled = true;
+        }
     }
 
     // ── Voice Analyzer: Start / End Conversation ─────────────────────────────

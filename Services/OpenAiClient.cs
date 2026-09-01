@@ -76,7 +76,7 @@ public sealed class OpenAiClient
         using var form = new MultipartFormDataContent();
         using var fileStream = File.OpenRead(audioFilePath);
         using var fileContent = new StreamContent(fileStream);
-        fileContent.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue(MimeForAudio(audioFilePath));
 
         form.Add(fileContent, "file", Path.GetFileName(audioFilePath));
         form.Add(new StringContent(_cfg.TranscribeModel), "model");
@@ -86,6 +86,9 @@ public sealed class OpenAiClient
         // hallucinated output below instead of trusting whatever text
         // Whisper returns unconditionally.
         form.Add(new StringContent("verbose_json"), "response_format");
+        // Prime the model with clinical vocabulary so it mis-hears fewer terms.
+        if (!string.IsNullOrWhiteSpace(_cfg.AudioPrompt))
+            form.Add(new StringContent(_cfg.AudioPrompt), "prompt");
 
         var response = await _audioHttp.PostAsync("audio/transcriptions", form);
         var body = await response.Content.ReadAsStringAsync();
@@ -109,7 +112,7 @@ public sealed class OpenAiClient
     /// Thresholds are conservative on purpose - missing a real quiet phrase
     /// is far preferable to fabricating text in a patient's chart.
     /// </summary>
-    private static string ExtractRealSpeechFromVerboseJson(string json)
+    private string ExtractRealSpeechFromVerboseJson(string json)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -124,34 +127,45 @@ public sealed class OpenAiClient
         {
             var text = segment.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "";
             if (string.IsNullOrWhiteSpace(text)) continue;
-
-            var noSpeechProb = segment.TryGetProperty("no_speech_prob", out var nsp) ? nsp.GetDouble() : 0;
-            var avgLogProb = segment.TryGetProperty("avg_logprob", out var alp) ? alp.GetDouble() : 0;
-
-            var soundsLikeSilence = noSpeechProb > 0.5;
-            var lowConfidence = avgLogProb < -1.0;
-
-            if (!soundsLikeSilence && !lowConfidence)
-            {
-                keptSegments.Add(text.Trim());
-            }
+            if (IsLikelyHallucination(segment)) continue;
+            keptSegments.Add(text.Trim());
         }
 
         return string.Join(" ", keptSegments).Trim();
     }
 
     /// <summary>
-    /// Transcribes one live audio chunk AND diarizes it in a single call, using
-    /// gpt-4o-transcribe-diarize anchored to the enrolled doctor's voice
-    /// (DoctorVoiceEnrollment). Returns the model's segments *raw* - the caller
-    /// (<see cref="SpeakerAttributionRefiner"/>) resolves them to stable
-    /// conversation-wide Doctor/Patient roles, since a single chunk's labels
-    /// can't be trusted for identity on their own. One chunk can yield several
-    /// segments if a quick back-and-forth happened inside it.
+    /// True if Whisper's own per-segment signals say this isn't real speech.
+    /// Thresholds are config-driven (AppConfig.AudioMaxNoSpeechProb /
+    /// AudioMinAvgLogProb) because small local models score confidence lower
+    /// than OpenAI Whisper - too strict a cutoff silently drops real speech.
     /// </summary>
+    private bool IsLikelyHallucination(JsonElement segment)
+    {
+        var noSpeechProb = segment.TryGetProperty("no_speech_prob", out var nsp) && nsp.ValueKind == JsonValueKind.Number ? nsp.GetDouble() : 0;
+        var avgLogProb = segment.TryGetProperty("avg_logprob", out var alp) && alp.ValueKind == JsonValueKind.Number ? alp.GetDouble() : 0;
+        return noSpeechProb > _cfg.AudioMaxNoSpeechProb || avgLogProb < _cfg.AudioMinAvgLogProb;
+    }
+
+    private static string MimeForAudio(string path) => Path.GetExtension(path).ToLowerInvariant() switch
+    {
+        ".mp3" => "audio/mpeg",
+        ".m4a" => "audio/mp4",
+        ".wav" => "audio/wav",
+        _ => "application/octet-stream",
+    };
+
     /// <summary>True when the Voice Analyzer uses real (voice-anchored) diarization; false = local transcription only, roles inferred by turn-taking.</summary>
     public bool DiarizationEnabled => _cfg.DiarizationEnabled;
 
+    /// <summary>
+    /// Transcribes one live audio chunk. With diarization on it also labels
+    /// each segment's speaker (gpt-4o-transcribe-diarize, anchored to the
+    /// enrolled doctor voice); with it off it's plain transcription and the
+    /// caller (<see cref="SpeakerAttributionRefiner"/>) assigns Doctor/Patient
+    /// by turn-taking. Returns the model's segments raw. One chunk can yield
+    /// several segments if a quick back-and-forth happened inside it.
+    /// </summary>
     public async Task<List<RawDiarizedSegment>> TranscribeAndDiarizeRawAsync(string audioFilePath, string? doctorReferenceDataUrl)
     {
         using var form = new MultipartFormDataContent();
@@ -179,6 +193,8 @@ public sealed class OpenAiClient
             form.Add(new StringContent(_cfg.TranscribeModel), "model");
             form.Add(new StringContent("verbose_json"), "response_format");
             form.Add(new StringContent("en"), "language");
+            if (!string.IsNullOrWhiteSpace(_cfg.AudioPrompt))
+                form.Add(new StringContent(_cfg.AudioPrompt), "prompt");
         }
 
         var response = await _audioHttp.PostAsync("audio/transcriptions", form);
@@ -193,7 +209,7 @@ public sealed class OpenAiClient
         return ParseRawDiarizedSegments(body);
     }
 
-    private static List<RawDiarizedSegment> ParseRawDiarizedSegments(string json)
+    private List<RawDiarizedSegment> ParseRawDiarizedSegments(string json)
     {
         using var doc = JsonDocument.Parse(json);
         var segments = new List<RawDiarizedSegment>();
@@ -206,11 +222,9 @@ public sealed class OpenAiClient
             var text = segment.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "";
             if (string.IsNullOrWhiteSpace(text)) continue;
 
-            // Skip Whisper hallucinations on the plain-transcription path
-            // (diarized_json has no these fields, so this is a no-op there).
-            var noSpeechProb = segment.TryGetProperty("no_speech_prob", out var nsp) && nsp.ValueKind == JsonValueKind.Number ? nsp.GetDouble() : 0;
-            var avgLogProb = segment.TryGetProperty("avg_logprob", out var alp) && alp.ValueKind == JsonValueKind.Number ? alp.GetDouble() : 0;
-            if (noSpeechProb > 0.5 || avgLogProb < -1.0) continue;
+            // Drop hallucinations on the plain-transcription path (diarized_json
+            // carries no confidence fields, so this is a no-op for that path).
+            if (IsLikelyHallucination(segment)) continue;
 
             var rawSpeaker = segment.TryGetProperty("speaker", out var s) ? s.GetString() ?? "" : "";
             double? start = segment.TryGetProperty("start", out var st) && st.ValueKind == JsonValueKind.Number ? st.GetDouble() : null;
@@ -223,16 +237,20 @@ public sealed class OpenAiClient
     }
 
     /// <summary>
-    /// Extracts structured clinical information from the (speaker-tagged)
-    /// conversation into EXACTLY the shape of the doctor's chosen
-    /// <see cref="NoteTemplate"/> - sections, field keys, and per-field "prompt"
-    /// guidance all come from the template, so the output matches that doctor's
-    /// schema instead of a hardcoded HPI/ROS layout.
+    /// Extracts structured clinical information into EXACTLY the shape of the
+    /// doctor's chosen <see cref="NoteTemplate"/> - sections, field keys, and
+    /// per-field "prompt" guidance all come from the template. Takes the
+    /// speaker-tagged live conversation.
     /// </summary>
-    public async Task<TemplateExtractionResult> ExtractStructuredAsync(List<ConversationTurn> turns, NoteTemplate template)
-    {
-        var conversation = string.Join("\n", turns.Select(t => $"{t.SpeakerLabel}: {t.Text}"));
+    public Task<TemplateExtractionResult> ExtractStructuredAsync(List<ConversationTurn> turns, NoteTemplate template)
+        => ExtractStructuredCoreAsync(string.Join("\n", turns.Select(t => $"{t.SpeakerLabel}: {t.Text}")), template);
 
+    /// <summary>Same extraction, from a plain block of text (File Analyzer - a pasted transcript, a transcribed recording, or a document).</summary>
+    public Task<TemplateExtractionResult> ExtractStructuredFromTextAsync(string sourceText, NoteTemplate template)
+        => ExtractStructuredCoreAsync(sourceText, template);
+
+    private async Task<TemplateExtractionResult> ExtractStructuredCoreAsync(string sourceText, NoteTemplate template)
+    {
         var templateLines = new List<string>();
         var schemaSections = new List<string>();
         foreach (var section in template.Sections)
@@ -251,18 +269,18 @@ public sealed class OpenAiClient
         var schema = "{\n  \"sections\": {\n    " + string.Join(",\n    ", schemaSections) + "\n  }\n}";
 
         var prompt = $$"""
-            You are a board-certified medical scribe. Extract structured clinical information from this doctor-patient conversation into EXACTLY the schema below - do not add, drop, or rename any key.
+            You are a board-certified medical scribe. Extract structured clinical information from the clinical source text below into EXACTLY the schema below - do not add, drop, or rename any key.
 
             TEMPLATE (each field shows its key and guidance on what to capture):
             {{string.Join("\n", templateLines)}}
 
-            CONVERSATION:
-            {{conversation}}
+            SOURCE TEXT:
+            {{sourceText}}
 
             Return ONLY valid JSON in this exact shape (no markdown, no preamble):
             {{schema}}
 
-            Use "Not discussed" for any field the conversation does not cover. Be concise and clinically accurate.
+            Use "Not discussed" for any field the source text does not cover. Be concise and clinically accurate.
             """;
 
         var json = await ChatJsonAsync(prompt);

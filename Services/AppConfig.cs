@@ -43,6 +43,30 @@ public sealed class AppConfig
     /// </summary>
     public string AudioDiarization { get; private init; } = "openai";
 
+    /// <summary>
+    /// Passed to plain transcription (Whisper / local) as the "prompt" - primes
+    /// the model with medical vocabulary and drug names so it mis-hears fewer
+    /// clinical terms. Not used on the diarized OpenAI path.
+    /// </summary>
+    public string AudioPrompt { get; private init; } = DefaultAudioPrompt;
+
+    /// <summary>Segments with a higher no-speech probability than this are dropped as silence/noise.</summary>
+    public double AudioMaxNoSpeechProb { get; private init; } = 0.6;
+
+    /// <summary>
+    /// Segments with a lower average token log-probability than this are dropped
+    /// as likely hallucinations. Small local models score systematically lower
+    /// than OpenAI Whisper, so the default is looser for a local endpoint
+    /// (otherwise real speech gets discarded and the transcript looks "wrong").
+    /// </summary>
+    public double AudioMinAvgLogProb { get; private init; } = -1.0;
+
+    private const string DefaultAudioPrompt =
+        "A clinical consultation between a doctor and a patient. Possible terms: hypertension, " +
+        "type 2 diabetes mellitus, hyperlipidemia, GERD, COPD, asthma, myocardial infarction, dyspnea, " +
+        "metformin, lisinopril, atorvastatin, amlodipine, omeprazole, albuterol, blood pressure, HbA1c, " +
+        "CBC, milligrams, twice daily, chief complaint, review of systems.";
+
     public bool DiarizationEnabled =>
         !string.Equals(AudioDiarization, "off", StringComparison.OrdinalIgnoreCase);
 
@@ -84,8 +108,15 @@ public sealed class AppConfig
                 ? el.GetBoolean()
                 : fallback;
 
+        double? Num(string key)
+            => haveJson && root.TryGetProperty(key, out var el) && el.ValueKind == JsonValueKind.Number
+                ? el.GetDouble()
+                : null;
+
         var env = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
         var sharedKey = Str("OpenAiApiKey") ?? (string.IsNullOrWhiteSpace(env) ? null : env.Trim());
+        var audioBaseUrl = (Str("AudioBaseUrl") ?? OpenAiV1).TrimEnd('/');
+        var audioIsOpenAi = IsOpenAi(audioBaseUrl);
 
         return new AppConfig
         {
@@ -93,11 +124,15 @@ public sealed class AppConfig
             ChatModel = Str("ChatModel") ?? "gpt-4o",
             ChatApiKey = Str("ChatApiKey") ?? sharedKey,
             ChatJsonMode = Bool("ChatJsonMode", true),
-            AudioBaseUrl = (Str("AudioBaseUrl") ?? OpenAiV1).TrimEnd('/'),
+            AudioBaseUrl = audioBaseUrl,
             AudioApiKey = Str("AudioApiKey") ?? sharedKey,
             TranscribeModel = Str("TranscribeModel") ?? "whisper-1",
             DiarizeModel = Str("DiarizeModel") ?? "gpt-4o-transcribe-diarize",
             AudioDiarization = Str("AudioDiarization") ?? "openai",
+            AudioPrompt = Str("AudioPrompt") ?? DefaultAudioPrompt,
+            AudioMaxNoSpeechProb = Num("AudioMaxNoSpeechProb") ?? 0.6,
+            // looser hallucination cutoff for small local models
+            AudioMinAvgLogProb = Num("AudioMinAvgLogProb") ?? (audioIsOpenAi ? -1.0 : -2.2),
         };
     }
 
@@ -119,7 +154,8 @@ public sealed class AppConfig
                     "DEV - Ollama:    ChatBaseUrl = http://localhost:11434/v1 ; ChatModel = llama3.1:8b (or your pulled model) ; no key needed.",
                     "If a local model rejects strict JSON mode, set ChatJsonMode = false.",
                     "DICTATION can run local: point AudioBaseUrl at a faster-whisper server (e.g. Speaches on http://localhost:8000/v1) and set TranscribeModel to its model id.",
-                    "VOICE ANALYZER: gpt-4o-transcribe-diarize (speaker-anchored) is OpenAI only. To test fully offline set AudioDiarization = off - it then uses plain local transcription and infers Doctor/Patient from turn-taking (no voice enrollment needed, less accurate on who-said-what)."
+                    "VOICE ANALYZER: gpt-4o-transcribe-diarize (speaker-anchored) is OpenAI only. To test fully offline set AudioDiarization = off - it then uses plain local transcription and infers Doctor/Patient from turn-taking (no voice enrollment needed, less accurate on who-said-what).",
+                    "ACCURACY: use TranscribeModel = deepdml/faster-whisper-large-v3-turbo-ct2 (or Systran/faster-whisper-medium) - the 'small' model is poor on medical terms. AudioPrompt primes clinical vocabulary. Loosen AudioMinAvgLogProb (e.g. -3.0) if words are being dropped."
                 },
                 OpenAiApiKey = "",
                 ChatBaseUrl = OpenAiV1,
@@ -131,6 +167,9 @@ public sealed class AppConfig
                 TranscribeModel = "whisper-1",
                 DiarizeModel = "gpt-4o-transcribe-diarize",
                 AudioDiarization = "openai",
+                AudioPrompt = "",
+                AudioMaxNoSpeechProb = 0.6,
+                AudioMinAvgLogProb = -1.0,
             };
             File.WriteAllText(FilePath, JsonSerializer.Serialize(template, new JsonSerializerOptions { WriteIndented = true }));
         }

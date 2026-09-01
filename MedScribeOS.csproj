@@ -41,6 +41,9 @@
     <!-- NAudio: captures microphone audio to a WAV file for the visit.
          Replaces the browser's MediaRecorder API used in the extension. -->
     <PackageReference Include="NAudio" Version="2.2.1" />
+    <!-- PdfPig: pure-C# PDF text extraction for the File Analyzer.
+         .docx is read directly as a zip, no package needed. -->
+    <PackageReference Include="PdfPig" Version="0.1.9" />
   </ItemGroup>
 
 </Project>
