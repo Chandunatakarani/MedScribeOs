@@ -6,7 +6,55 @@
         Title="MedScribeAI" Height="760" Width="920"
         Background="{StaticResource BgDarkBrush}"
         WindowStartupLocation="CenterScreen"
-        FontFamily="Segoe UI">
+        FontFamily="Segoe UI" FontSize="13">
+    <Window.Resources>
+        <svc:SpeakerToAlignmentConverter x:Key="SpeakerAlign"/>
+        <svc:SpeakerToBubbleBrushConverter x:Key="SpeakerBubble"/>
+        <svc:SpeakerToForegroundConverter x:Key="SpeakerFg"/>
+        <svc:SpeakerToCornerConverter x:Key="SpeakerCorner"/>
+        <svc:SpeakerToHeaderConverter x:Key="SpeakerHeader"/>
+
+        <!-- One bubble template for both sides; the converters above key every
+             per-speaker difference (side, colour, corner, header) off Speaker. -->
+        <DataTemplate x:Key="ChatBubbleTemplate">
+            <Grid Margin="0,5,0,5" HorizontalAlignment="{Binding Converter={StaticResource SpeakerAlign}}">
+                <Border MaxWidth="580" Padding="14,10"
+                        Background="{Binding Converter={StaticResource SpeakerBubble}}"
+                        CornerRadius="{Binding Converter={StaticResource SpeakerCorner}}">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                            <TextBlock Text="{Binding Converter={StaticResource SpeakerHeader}}"
+                                       FontSize="11.5" FontWeight="Bold" Opacity="0.85"
+                                       Foreground="{Binding Converter={StaticResource SpeakerFg}}"/>
+                            <TextBlock Text="{Binding Timestamp, StringFormat='HH:mm'}"
+                                       Margin="7,0,0,0" FontSize="11.5" Opacity="0.65"
+                                       Foreground="{Binding Converter={StaticResource SpeakerFg}}"/>
+                            <Button Content="⇄" Click="FlipSpeaker_Click" ToolTip="Wrong speaker? Click to flip Doctor / Patient"
+                                    Margin="8,0,0,0" Padding="0" BorderThickness="0" Background="Transparent"
+                                    Cursor="Hand" FontSize="12" Opacity="0.75"
+                                    Foreground="{Binding Converter={StaticResource SpeakerFg}}"/>
+                        </StackPanel>
+                        <TextBlock Text="{Binding Text}" TextWrapping="Wrap" FontSize="14.5" LineHeight="20"
+                                   Foreground="{Binding Converter={StaticResource SpeakerFg}}"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </DataTemplate>
+
+        <Style x:Key="ChatItemStyle" TargetType="ListBoxItem">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Margin" Value="0"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <ContentPresenter/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -15,14 +63,15 @@
         </Grid.RowDefinitions>
 
         <!-- Header -->
-        <Border Grid.Row="0" Padding="20,16" BorderBrush="{StaticResource BorderBrush2}" BorderThickness="0,0,0,1">
+        <Border Grid.Row="0" Padding="22,16" Background="{StaticResource NavBarBrush}"
+                BorderBrush="{StaticResource BorderBrush2}" BorderThickness="0,0,0,1">
             <DockPanel LastChildFill="False">
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
-                    <TextBlock Text="🩺 MedScribeAI" Foreground="{StaticResource TextPrimaryBrush}" FontSize="18" FontWeight="Bold"/>
-                    <TextBlock Text="  ·  Horizon Family Medical Group" Foreground="{StaticResource TextSecondaryBrush}" FontSize="12" VerticalAlignment="Bottom" Margin="0,0,0,2"/>
+                    <TextBlock Text="🩺 MedScribeAI" Foreground="{StaticResource TextPrimaryBrush}" FontSize="19" FontWeight="Bold"/>
+                    <TextBlock Text="  ·  Horizon Family Medical Group" Foreground="{StaticResource TextSecondaryBrush}" FontSize="13" VerticalAlignment="Bottom" Margin="0,0,0,2"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" VerticalAlignment="Center">
-                    <TextBlock x:Name="TxtCurrentUser" Foreground="{StaticResource TextSecondaryBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                    <TextBlock x:Name="TxtCurrentUser" Foreground="{StaticResource TextPrimaryBrush}" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,12,0"/>
                     <Button x:Name="BtnTemplates" Content="📋 Templates" Style="{StaticResource GhostButtonStyle}" Margin="0,0,8,0" Click="BtnTemplates_Click"/>
                     <Button x:Name="BtnSignOut" Content="Sign out" Style="{StaticResource GhostButtonStyle}" Click="BtnSignOut_Click"/>
                 </StackPanel>
@@ -54,9 +103,9 @@
                             <Button x:Name="BtnStartConvo" Content="● Start Conversation" Style="{StaticResource PrimaryButtonStyle}" Click="BtnStartConvo_Click"/>
                             <Button x:Name="BtnEndConvo" Content="⏹ End Conversation" Style="{StaticResource GhostButtonStyle}" Margin="10,0,0,0" IsEnabled="False" Click="BtnEndConvo_Click"/>
                             <TextBlock x:Name="TxtConvoStatus" Text="Not recording" Foreground="{StaticResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="16,0,0,0"/>
-                            <ProgressBar x:Name="MicLevelBar" Width="80" Height="8" Minimum="0" Maximum="1" Value="0"
+                            <ProgressBar x:Name="MicLevelBar" Width="80" Height="6" Minimum="0" Maximum="1" Value="0"
                                          Background="{StaticResource BgDarkBrush}" BorderBrush="{StaticResource BorderBrush2}"
-                                         Foreground="{StaticResource TextPrimaryBrush}" VerticalAlignment="Center" Margin="16,0,0,0"
+                                         Foreground="{StaticResource AccentBrush}" VerticalAlignment="Center" Margin="16,0,0,0"
                                          Visibility="Collapsed"/>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
@@ -80,11 +129,22 @@
                 </Border>
 
                 <Border Grid.Row="2" Style="{StaticResource CardBorderStyle}">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto">
-                        <StackPanel x:Name="TranscriptPanel">
-                            <TextBlock Text="Press Start Conversation to begin. The full conversation will appear here for your review before any AI drafting happens - nothing is charted automatically." Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"/>
-                        </StackPanel>
-                    </ScrollViewer>
+                    <Grid>
+                        <!-- Live two-sided chat: doctor bubbles right, patient bubbles left,
+                             appended turn-by-turn as each is transcribed, auto-scrolled to newest. -->
+                        <ListBox x:Name="ChatList"
+                                 ItemsSource="{Binding ChatTurns, RelativeSource={RelativeSource AncestorType=Window}}"
+                                 ItemTemplate="{StaticResource ChatBubbleTemplate}"
+                                 ItemContainerStyle="{StaticResource ChatItemStyle}"
+                                 Background="Transparent" BorderThickness="0"
+                                 HorizontalContentAlignment="Stretch"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto"/>
+                        <TextBlock x:Name="TxtChatEmpty"
+                                   Text="Press Start Conversation to begin. Turns appear here live as a two-sided chat — nothing is charted automatically."
+                                   Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"
+                                   VerticalAlignment="Top" FontStyle="Italic"/>
+                    </Grid>
                 </Border>
 
                 <Border Grid.Row="3" x:Name="PanelHpiRos" Style="{StaticResource CardBorderStyle}" Margin="0,12,0,0" Visibility="Collapsed" MaxHeight="340">
@@ -105,7 +165,7 @@
                     <Grid Width="110" Height="110" Cursor="Hand" MouseLeftButtonUp="MicCircle_Click">
                         <Ellipse x:Name="MicCircle" Fill="{StaticResource BorderBrush2}">
                             <Ellipse.Effect>
-                                <DropShadowEffect Color="#FFFFFF" BlurRadius="24" ShadowDepth="0" Opacity="0.4"/>
+                                <DropShadowEffect Color="#007AFF" BlurRadius="28" ShadowDepth="0" Opacity="0.22"/>
                             </Ellipse.Effect>
                         </Ellipse>
                         <TextBlock Text="🎙" FontSize="40" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"/>

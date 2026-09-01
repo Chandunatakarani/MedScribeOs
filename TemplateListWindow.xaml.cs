@@ -25,6 +25,7 @@ public partial class TemplateListWindow : Window
     public TemplateListWindow()
     {
         InitializeComponent();
+        GlassChrome.Apply(this);
         Reload();
     }
 
@@ -50,10 +51,10 @@ public partial class TemplateListWindow : Window
         var card = new Border
         {
             Background = (Brush)FindResource("BgCardBrush"),
-            BorderBrush = (Brush)FindResource(template.IsDefault ? "TextPrimaryBrush" : "BorderBrush2"),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(10),
-            Padding = new Thickness(14),
+            BorderBrush = (Brush)FindResource(template.IsDefault ? "AccentBrush" : "BorderBrush2"),
+            BorderThickness = new Thickness(template.IsDefault ? 1.5 : 1),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(16),
             Margin = new Thickness(0, 0, 0, 10),
         };
 
@@ -68,7 +69,7 @@ public partial class TemplateListWindow : Window
         {
             Text = template.Name,
             Foreground = (Brush)FindResource("TextPrimaryBrush"),
-            FontSize = 14,
+            FontSize = 15,
             FontWeight = FontWeights.Bold,
             VerticalAlignment = VerticalAlignment.Center,
         });
@@ -76,12 +77,12 @@ public partial class TemplateListWindow : Window
         {
             titleRow.Children.Add(new Border
             {
-                Background = (Brush)FindResource("TextPrimaryBrush"),
-                CornerRadius = new CornerRadius(4),
-                Padding = new Thickness(6, 1, 6, 1),
+                Background = (Brush)FindResource("AccentBrush"),
+                CornerRadius = new CornerRadius(5),
+                Padding = new Thickness(7, 2, 7, 2),
                 Margin = new Thickness(8, 0, 0, 0),
                 VerticalAlignment = VerticalAlignment.Center,
-                Child = new TextBlock { Text = "DEFAULT", Foreground = Brushes.Black, FontSize = 9, FontWeight = FontWeights.Bold },
+                Child = new TextBlock { Text = "DEFAULT", Foreground = Brushes.White, FontSize = 10, FontWeight = FontWeights.Bold },
             });
         }
         info.Children.Add(titleRow);
@@ -91,8 +92,8 @@ public partial class TemplateListWindow : Window
         {
             Text = $"{template.Sections.Count} section(s) · {fieldCount} field(s)   —   {string.Join(", ", template.Sections.Select(s => s.SectionKey))}",
             Foreground = (Brush)FindResource("TextSecondaryBrush"),
-            FontSize = 11,
-            Margin = new Thickness(0, 4, 0, 0),
+            FontSize = 12.5,
+            Margin = new Thickness(0, 5, 0, 0),
             TextTrimming = TextTrimming.CharacterEllipsis,
         });
         Grid.SetColumn(info, 0);
@@ -119,7 +120,7 @@ public partial class TemplateListWindow : Window
             Content = text,
             Style = (Style)FindResource(primary ? "PrimaryButtonStyle" : "GhostButtonStyle"),
             Margin = new Thickness(6, 0, 0, 0),
-            FontSize = 11,
+            FontSize = 13,
         };
         button.Click += (_, _) => onClick();
         return button;

@@ -6,7 +6,7 @@
         Height="780" Width="860" MinWidth="720" MinHeight="560"
         Background="{StaticResource BgDarkBrush}"
         WindowStartupLocation="CenterOwner"
-        FontFamily="Segoe UI">
+        FontFamily="Segoe UI" FontSize="13">
     <Grid Margin="24">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -22,7 +22,7 @@
 
         <StackPanel Grid.Row="1" Margin="0,18,0,0">
             <TextBlock Text="TEMPLATE NAME" Style="{StaticResource LabelStyle}" Margin="0,0,0,6"/>
-            <TextBox x:Name="NameBox" Height="42" FontSize="14" Padding="10,8" VerticalContentAlignment="Center"/>
+            <TextBox x:Name="NameBox" MinHeight="44" FontSize="14"/>
         </StackPanel>
 
         <DockPanel Grid.Row="2" Margin="0,24,0,10" LastChildFill="False">

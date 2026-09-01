@@ -15,6 +15,7 @@ public partial class LoginWindow : Window
     public LoginWindow()
     {
         InitializeComponent();
+        Services.GlassChrome.Apply(this);
     }
 
     protected override void OnClosed(EventArgs e)

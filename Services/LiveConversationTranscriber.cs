@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using MedScribeOS.Models;
 using NAudio.Wave;
 
 namespace MedScribeOS.Services;
@@ -53,11 +54,20 @@ public sealed class LiveConversationTranscriber : IDisposable
     private Task? _consumerTask;
     private WaveInEvent? _waveIn;
 
+    // Resolves the diarization model's noisy per-chunk labels into a stable
+    // conversation-wide Doctor/Patient stream. Recreated per recording.
+    private SpeakerAttributionRefiner _refiner = new();
+    private int _turnsEmitted;
+    private bool _anchorWarned;
+
     public bool IsRunning { get; private set; }
 
-    /// <summary>Fired (off the UI thread) whenever a turn finishes transcription + voice-based speaker labeling, in speaking order.</summary>
+    /// <summary>Fired (off the UI thread) whenever a turn finishes transcription + speaker attribution, in speaking order.</summary>
     public event Action<ConversationTurn>? TurnAdded;
     public event Action<string>? ErrorOccurred;
+
+    /// <summary>Non-fatal advisory for the user (e.g. the doctor voice isn't matching). Routed to a warning toast, not an error.</summary>
+    public event Action<string>? Notice;
 
     public LiveConversationTranscriber(OpenAiClient openAi) => _openAi = openAi;
 
@@ -65,12 +75,25 @@ public sealed class LiveConversationTranscriber : IDisposable
     {
         if (IsRunning) return;
 
-        if (!DoctorVoiceEnrollment.IsEnrolled)
+        // Voice enrollment only matters when real (voice-anchored) diarization
+        // is on. In offline mode roles come from turn-taking, so no reference.
+        if (_openAi.DiarizationEnabled)
         {
-            ErrorOccurred?.Invoke("Doctor's voice isn't enrolled yet - speaker labels would be unreliable, so live transcription was not started.");
-            return;
+            if (!DoctorVoiceEnrollment.IsEnrolled)
+            {
+                ErrorOccurred?.Invoke("Doctor's voice isn't enrolled yet - speaker labels would be unreliable, so live transcription was not started.");
+                return;
+            }
+            _doctorReferenceDataUrl = DoctorVoiceEnrollment.GetReferenceAsDataUrl();
         }
-        _doctorReferenceDataUrl = DoctorVoiceEnrollment.GetReferenceAsDataUrl();
+        else
+        {
+            _doctorReferenceDataUrl = null;
+        }
+
+        _refiner = new SpeakerAttributionRefiner();
+        _turnsEmitted = 0;
+        _anchorWarned = false;
 
         lock (_bufferLock)
         {
@@ -209,10 +232,24 @@ public sealed class LiveConversationTranscriber : IDisposable
         {
             try
             {
-                var turns = await _openAi.TranscribeAndDiarizeTurnAsync(path, _doctorReferenceDataUrl!);
+                var raw = await _openAi.TranscribeAndDiarizeRawAsync(path, _doctorReferenceDataUrl);
+                var turns = _refiner.Refine(raw, DateTimeOffset.Now);
+
                 foreach (var turn in turns)
                 {
+                    _turnsEmitted++;
                     TurnAdded?.Invoke(turn);
+                }
+
+                // Only meaningful when voice-anchored diarization is on: if the
+                // enrolled doctor voice still hasn't matched after a few turns,
+                // labels are coming from the turn-taking fallback - say so once.
+                if (_openAi.DiarizationEnabled && !_anchorWarned && _turnsEmitted >= 6 && !_refiner.VoiceAnchorMatched)
+                {
+                    _anchorWarned = true;
+                    Notice?.Invoke(
+                        "The enrolled doctor voice hasn't matched any speech yet, so Doctor/Patient labels are being inferred from turn-taking. " +
+                        "Re-enrolling the doctor voice (quiet room, ~8s) will make attribution reliable.");
                 }
             }
             catch (Exception ex)

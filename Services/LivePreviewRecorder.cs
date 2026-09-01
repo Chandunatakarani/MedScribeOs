@@ -11,11 +11,11 @@ namespace MedScribeOS.Services;
 /// pressed.
 ///
 /// This used to run a second, parallel Whisper transcription over rolling
-/// chunks just to print italic placeholder text that RenderTranscript() threw
-/// away the moment the real (diarized) transcript came back - paying for a
-/// full second transcription of the entire visit for a result nobody ever
-/// saw used. A local peak-amplitude meter gives the same "yes, it's hearing
-/// you" reassurance with zero API cost.
+/// chunks just to print italic placeholder text that the live transcript threw
+/// away the moment the real (diarized) turns came back - paying for a full
+/// second transcription of the entire visit for a result nobody ever saw
+/// used. A local peak-amplitude meter gives the same "yes, it's hearing you"
+/// reassurance with zero API cost.
 /// </summary>
 public sealed class LivePreviewRecorder : IDisposable
 {

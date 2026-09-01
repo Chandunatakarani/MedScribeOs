@@ -3,11 +3,11 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Sign in · MedScribeAI"
         Icon="/Assets/appicon.ico"
-        Height="470" Width="400"
+        Height="500" Width="420"
         Background="{StaticResource BgDarkBrush}"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
-        FontFamily="Segoe UI"
+        FontFamily="Segoe UI" FontSize="13"
         FocusManager.FocusedElement="{Binding ElementName=EmailBox}">
     <Grid Margin="32">
         <Grid.RowDefinitions>
@@ -26,14 +26,11 @@
         <TextBlock Grid.Row="1" Text="Horizon Family Medical Group — sign in to continue"
                    Foreground="{StaticResource TextSecondaryBrush}" FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap"/>
 
-        <TextBlock Grid.Row="2" Text="EMAIL" Style="{StaticResource LabelStyle}" Margin="0,28,0,6"/>
-        <TextBox Grid.Row="3" x:Name="EmailBox" Height="36" VerticalContentAlignment="Center"/>
+        <TextBlock Grid.Row="2" Text="EMAIL" Style="{StaticResource LabelStyle}" Margin="0,32,0,6"/>
+        <TextBox Grid.Row="3" x:Name="EmailBox" MinHeight="44"/>
 
-        <TextBlock Grid.Row="4" Text="PASSWORD" Style="{StaticResource LabelStyle}" Margin="0,16,0,6"/>
-        <PasswordBox Grid.Row="5" x:Name="PasswordBox" Height="36" VerticalContentAlignment="Center"
-                     Background="{StaticResource BgCard2Brush}" Foreground="{StaticResource TextPrimaryBrush}"
-                     BorderBrush="{StaticResource BorderBrush2}" BorderThickness="1" Padding="8"
-                     CaretBrush="{StaticResource TextPrimaryBrush}"/>
+        <TextBlock Grid.Row="4" Text="PASSWORD" Style="{StaticResource LabelStyle}" Margin="0,18,0,6"/>
+        <PasswordBox Grid.Row="5" x:Name="PasswordBox" MinHeight="44"/>
 
         <TextBlock Grid.Row="6" x:Name="ErrorText"
                    Foreground="{StaticResource RedBrush}" TextWrapping="Wrap" FontSize="12"
@@ -41,7 +38,7 @@
 
         <StackPanel Grid.Row="7" VerticalAlignment="Bottom">
             <Button x:Name="SignInButton" Content="Sign In" Style="{StaticResource PrimaryButtonStyle}"
-                    Height="40" IsDefault="True" Click="SignInButton_Click"/>
+                    Height="44" IsDefault="True" Click="SignInButton_Click"/>
             <TextBlock x:Name="StatusText" Text=""
                        Foreground="{StaticResource TextSecondaryBrush}" FontSize="11"
                        HorizontalAlignment="Center" Margin="0,10,0,0" TextWrapping="Wrap" TextAlignment="Center"/>

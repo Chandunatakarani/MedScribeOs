@@ -28,6 +28,7 @@ public partial class TemplateEditorWindow : Window
     public TemplateEditorWindow(DoctorTemplateFile file, NoteTemplate? template)
     {
         InitializeComponent();
+        GlassChrome.Apply(this);
         _file = file;
         _isNew = template == null;
 

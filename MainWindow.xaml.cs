@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -23,7 +24,8 @@ public partial class MainWindow : Window
     private readonly ITemplateStore _templateStore = new JsonTemplateStore();
     private readonly ISessionService _session = SessionService.Instance;
 
-    private List<ConversationTurn> _turns = new();
+    /// <summary>Live conversation, bound to the chat ListBox. Turns are appended as each is transcribed; the item is replaced (not mutated) when a speaker is flipped.</summary>
+    public ObservableCollection<ConversationTurn> ChatTurns { get; } = new();
 
     // Filled by Analyze; both are shaped by whichever template the doctor picked.
     private NoteTemplate? _activeTemplate;
@@ -34,6 +36,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        GlassChrome.Apply(this);
 
         // Selecting the initial tab has to happen AFTER InitializeComponent
         // finishes, not via IsChecked="True" in the XAML - setting IsChecked
@@ -65,21 +68,23 @@ public partial class MainWindow : Window
             _liveTranscriber = new LiveConversationTranscriber(_openAi);
             _liveTranscriber.TurnAdded += turn => Dispatcher.Invoke(() =>
             {
-                _turns.Add(turn);
-                AppendLiveTurn(turn);
+                ChatTurns.Add(turn);
+                ChatList.ScrollIntoView(turn);
+                UpdateChatEmptyState();
             });
             _liveTranscriber.ErrorOccurred += err => Dispatcher.Invoke(() =>
             {
                 TxtConvoStatus.Text = $"[live transcription error: {err}]";
                 Notify.Error($"Live transcription: {err}");
             });
+            _liveTranscriber.Notice += msg => Dispatcher.Invoke(() => Notify.Warning(msg));
         }
         catch (Exception ex)
         {
             MessageBox.Show(
-                $"OPENAI_API_KEY is not set, so Voice Analyzer and Voice Dictation won't work until it is.\n\n{ex.Message}",
+                $"The AI provider isn't configured, so Voice Analyzer and Voice Dictation are disabled.\n\n{ex.Message}",
                 "MedScribeAI - setup needed", MessageBoxButton.OK, MessageBoxImage.Warning);
-            Notify.Error("OpenAI isn't configured - Voice Analyzer and Voice Dictation are disabled until an API key is set.");
+            Notify.Error("AI provider isn't configured - Voice Analyzer and Voice Dictation are disabled. See config.json.");
         }
 
         UpdateEnrollmentUi();
@@ -207,7 +212,18 @@ public partial class MainWindow : Window
     // ── Voice Analyzer: Start / End Conversation ─────────────────────────────
     private void BtnStartConvo_Click(object sender, RoutedEventArgs e)
     {
-        if (!DoctorVoiceEnrollment.IsEnrolled)
+        // A template has to be chosen up front - it shapes the extraction, and
+        // it's locked in for the whole conversation.
+        if (TemplatePicker.SelectedItem is not NoteTemplate template)
+        {
+            Notify.Warning("Select a note template before starting the conversation.");
+            TemplatePicker.Focus();
+            return;
+        }
+
+        // Voice enrollment is only needed for real (voice-anchored) diarization.
+        var needsEnrollment = _openAi?.DiarizationEnabled ?? true;
+        if (needsEnrollment && !DoctorVoiceEnrollment.IsEnrolled)
         {
             MessageBox.Show(
                 "Enroll the doctor's voice first (one-time, ~8 seconds) so Voice Analyzer can tell Doctor and Patient apart by voice instead of guessing.",
@@ -216,19 +232,24 @@ public partial class MainWindow : Window
             return;
         }
 
+        _activeTemplate = template;
+
         _recorder.Start();
         _livePreview?.Start();
-        _turns = new List<ConversationTurn>();
+        ChatTurns.Clear();
         _liveTranscriber?.Start();
         BtnStartConvo.IsEnabled = false;
         BtnEndConvo.IsEnabled = true;
-        Notify.Info("Recording started - speak naturally.");
+        // Lock the template for the duration of the recording.
+        TemplatePicker.IsEnabled = false;
+        BtnManageTemplates.IsEnabled = false;
+        Notify.Info($"Recording started with the \"{template.Name}\" template - speak naturally.");
         TxtConvoStatus.Text = "🔴 Recording — speak naturally";
         TxtConvoStatus.Foreground = (Brush)FindResource("TextPrimaryBrush");
         MicLevelBar.Visibility = Visibility.Visible;
         PanelAnalyzeAction.Visibility = Visibility.Collapsed;
         PanelHpiRos.Visibility = Visibility.Collapsed;
-        RenderTranscript();
+        UpdateChatEmptyState();
     }
 
     private async void BtnEndConvo_Click(object sender, RoutedEventArgs e)
@@ -241,31 +262,33 @@ public partial class MainWindow : Window
 
         if (_liveTranscriber == null)
         {
-            TxtConvoStatus.Text = "Nothing recorded, or OPENAI_API_KEY is missing.";
-            Notify.Error("Couldn't transcribe - OpenAI isn't configured. Set an API key and restart.");
+            TxtConvoStatus.Text = "Nothing recorded, or the AI provider isn't configured.";
+            Notify.Error("Couldn't transcribe - the AI provider isn't configured. Check config.json and restart.");
             BtnStartConvo.IsEnabled = true;
+            TemplatePicker.IsEnabled = true;
+            BtnManageTemplates.IsEnabled = true;
             return;
         }
 
         // A few turns may still be mid-transcription (queued right as End
         // Conversation was pressed) - wait for those to land before treating
-        // _turns as final, since they ARE the record now, not a placeholder.
+        // ChatTurns as final, since they ARE the record now.
         TxtConvoStatus.Text = "Finishing up the last few turns…";
         TxtConvoStatus.Foreground = (Brush)FindResource("TextSecondaryBrush");
 
         try
         {
             await _liveTranscriber.StopAndFlushAsync();
-            if (_turns.Count == 0) RenderTranscript();
+            UpdateChatEmptyState();
 
-            TxtConvoStatus.Text = _turns.Count > 0
-                ? $"✓ {_turns.Count} turns captured — review below, then Analyze."
+            TxtConvoStatus.Text = ChatTurns.Count > 0
+                ? $"✓ {ChatTurns.Count} turns captured — review below, then Analyze."
                 : "No speech was detected during the recording.";
             TxtConvoStatus.Foreground = (Brush)FindResource("TextPrimaryBrush");
-            PanelAnalyzeAction.Visibility = _turns.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            PanelAnalyzeAction.Visibility = ChatTurns.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
 
-            if (_turns.Count > 0)
-                Notify.Success($"{_turns.Count} turns captured - review them, then Analyze.");
+            if (ChatTurns.Count > 0)
+                Notify.Success($"{ChatTurns.Count} turns captured - review them, then Analyze.");
             else
                 Notify.Warning("Recording stopped, but no speech was detected.");
         }
@@ -278,87 +301,33 @@ public partial class MainWindow : Window
         finally
         {
             BtnStartConvo.IsEnabled = true;
+            TemplatePicker.IsEnabled = true;
+            BtnManageTemplates.IsEnabled = true;
         }
     }
 
-    /// <summary>Full rebuild - used for the initial/empty state and whenever a turn's speaker gets toggled.</summary>
-    private void RenderTranscript()
+    /// <summary>Shows the placeholder text only while the chat is empty.</summary>
+    private void UpdateChatEmptyState()
     {
-        TranscriptPanel.Children.Clear();
-
-        if (_turns.Count == 0)
-        {
-            TranscriptPanel.Children.Add(new TextBlock
-            {
-                Text = _recorder.IsRecording
-                    ? "🎙️ Recording — turns appear here live as you and the patient speak."
-                    : "Press Start Conversation to begin. The full conversation will appear here for your review before any AI drafting happens - nothing is charted automatically.",
-                Foreground = (Brush)FindResource("TextSecondaryBrush"),
-                TextWrapping = TextWrapping.Wrap,
-                FontStyle = FontStyles.Italic
-            });
-            return;
-        }
-
-        for (int i = 0; i < _turns.Count; i++)
-        {
-            TranscriptPanel.Children.Add(BuildTurnRow(_turns[i], i));
-        }
+        TxtChatEmpty.Visibility = ChatTurns.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        TxtChatEmpty.Text = _recorder.IsRecording
+            ? "🎙️ Recording — turns appear here live as you and the patient speak."
+            : "Press Start Conversation to begin. Turns appear here live as a two-sided chat — nothing is charted automatically.";
     }
 
     /// <summary>
-    /// Adds just the newest turn's row without touching earlier rows - a
-    /// full RenderTranscript() rebuild would tear down and recreate every
-    /// TextBox on screen, which would blow away an in-progress edit if the
-    /// provider is correcting an earlier turn's text right as a new one
-    /// streams in.
+    /// Per-bubble correction: flip a turn between Doctor and Patient. Replaces
+    /// the (immutable) item in ChatTurns so the bound list re-renders that bubble
+    /// on the other side. This also feeds the corrected labels into Analyze.
     /// </summary>
-    private void AppendLiveTurn(ConversationTurn turn)
+    private void FlipSpeaker_Click(object sender, RoutedEventArgs e)
     {
-        if (_turns.Count == 1)
-        {
-            RenderTranscript(); // first turn - panel currently only has the placeholder
-            return;
-        }
-        TranscriptPanel.Children.Add(BuildTurnRow(turn, _turns.Count - 1));
-    }
+        if ((sender as FrameworkElement)?.DataContext is not ConversationTurn turn) return;
+        var i = ChatTurns.IndexOf(turn);
+        if (i < 0) return;
 
-    private UIElement BuildTurnRow(ConversationTurn turn, int idx)
-    {
-        var row = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
-
-        var speakerBtn = new Button
-        {
-            Content = turn.Speaker == "Doctor" ? "DR" : "PT",
-            Width = 40,
-            Margin = new Thickness(0, 0, 8, 0),
-            Background = (Brush)FindResource(turn.Speaker == "Doctor" ? "TextPrimaryBrush" : "BorderBrush2"),
-            Foreground = turn.Speaker == "Doctor" ? Brushes.Black : Brushes.White,
-            FontWeight = FontWeights.Bold
-        };
-        speakerBtn.Click += (_, __) =>
-        {
-            var newSpeaker = _turns[idx].Speaker == "Doctor" ? "Patient" : "Doctor";
-            _turns[idx] = _turns[idx] with { Speaker = newSpeaker };
-            RenderTranscript();
-        };
-        DockPanel.SetDock(speakerBtn, Dock.Left);
-
-        var textBox = new TextBox
-        {
-            Text = turn.Text,
-            TextWrapping = TextWrapping.Wrap,
-            AcceptsReturn = true,
-            MinHeight = 36
-        };
-        textBox.LostFocus += (_, __) =>
-        {
-            _turns[idx] = _turns[idx] with { Text = textBox.Text };
-        };
-
-        row.Children.Add(speakerBtn);
-        row.Children.Add(textBox);
-        return row;
+        var flipped = turn.Speaker == SpeakerRole.Doctor ? SpeakerRole.Patient : SpeakerRole.Doctor;
+        ChatTurns[i] = turn with { Speaker = flipped };
     }
 
     // ── Voice Analyzer: Analyze → template sections ─────────────────────────
@@ -369,13 +338,16 @@ public partial class MainWindow : Window
             Notify.Error("Can't analyze - OpenAI isn't configured. Set an API key and restart.");
             return;
         }
-        if (_turns.Count == 0)
+        if (ChatTurns.Count == 0)
         {
             Notify.Warning("Nothing to analyze yet - record a conversation first.");
             return;
         }
 
-        if (TemplatePicker.SelectedItem is not NoteTemplate template)
+        // Use the template locked in at Start Conversation; fall back to the
+        // picker only if analysis is somehow reached without a recording.
+        var template = _activeTemplate ?? TemplatePicker.SelectedItem as NoteTemplate;
+        if (template == null)
         {
             Notify.Warning("Pick a note template before analyzing.");
             return;
@@ -386,7 +358,7 @@ public partial class MainWindow : Window
         Notify.Info($"Analyzing conversation with the \"{template.Name}\" template…");
         try
         {
-            _extraction = await _openAi.ExtractStructuredAsync(_turns, template);
+            _extraction = await _openAi.ExtractStructuredAsync(ChatTurns.ToList(), template);
             RenderExtraction();
             PanelHpiRos.Visibility = Visibility.Visible;
             Notify.Success($"\"{template.Name}\" draft ready - review every field before injecting.");
@@ -568,8 +540,8 @@ public partial class MainWindow : Window
 
     private void SetMicVisual(bool on)
     {
-        MicCircle.Fill = (Brush)FindResource(on ? "TextPrimaryBrush" : "BorderBrush2");
+        MicCircle.Fill = (Brush)FindResource(on ? "AccentBrush" : "BorderBrush2");
         TxtMicStatus.Text = on ? "ON — click any eCW field and speak" : "OFF — click to enable dictation";
-        TxtMicStatus.Foreground = (Brush)FindResource(on ? "TextPrimaryBrush" : "TextSecondaryBrush");
+        TxtMicStatus.Foreground = (Brush)FindResource(on ? "AccentBrush" : "TextSecondaryBrush");
     }
 }

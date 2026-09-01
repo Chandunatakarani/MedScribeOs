@@ -11,8 +11,6 @@ using MedScribeOS.Models;
 
 namespace MedScribeOS.Services;
 
-public record ConversationTurn(string Speaker, string Text);
-
 /// <summary>
 /// Output of a template-driven extraction: section key -> (field key -> value).
 /// Shape is entirely determined by the <see cref="NoteTemplate"/> that was
@@ -23,124 +21,53 @@ public sealed class TemplateExtractionResult
     public Dictionary<string, Dictionary<string, string>> Sections { get; } = new();
 }
 
-public record HpiRosResult(
-    Dictionary<string, string> Hpi,
-    Dictionary<string, string> Ros,
-    string? Assessment,
-    string? Plan,
-    string? AdditionalNotes);
-
 /// <summary>
-/// Ports the three OpenAI calls from the extension's ConversationAnalyzer.jsx:
-/// Whisper transcription, GPT-4o speaker diarization, and GPT-4o HPI/ROS
-/// extraction. Same models, same prompts, same JSON response shapes as the
-/// extension - just called from C# via HttpClient instead of the browser's
-/// fetch().
+/// The app's LLM + audio calls. The chat/extraction call goes to whatever
+/// OpenAI-compatible endpoint <see cref="AppConfig"/> points at (OpenAI in
+/// production, a local LM Studio / Ollama server in development); the audio
+/// calls still target OpenAI (Whisper + gpt-4o-transcribe-diarize).
 /// </summary>
 public sealed class OpenAiClient
 {
-    private readonly HttpClient _http;
+    private readonly AppConfig _cfg;
+    private readonly HttpClient _chatHttp;
+    private readonly HttpClient _audioHttp;
 
-    // Same HPI/ROS field template as DEFAULT_TEMPLATE in ConversationAnalyzer.jsx.
-    public const string DefaultTemplate = """
-        HPI Fields:
-        - Chief Complaint (main reason for visit)
-        - Onset (when symptoms started)
-        - Location (where in the body)
-        - Duration (how long symptoms last)
-        - Character (quality - sharp, dull, throbbing, burning; severity 1-10)
-        - Aggravating factors (what makes it worse)
-        - Relieving factors (what makes it better)
-        - Associated symptoms (other symptoms alongside main complaint)
-        - Prior episodes (has this happened before)
-        - Medications tried (what they've taken for this)
-
-        ROS (Review of Systems):
-        - Constitutional: fever, chills, fatigue, weight loss/gain, night sweats
-        - HEENT: headache, vision changes, ear pain, nasal congestion, sore throat
-        - Cardiovascular: chest pain, palpitations, shortness of breath on exertion, leg swelling
-        - Respiratory: dyspnea, cough, wheezing, hemoptysis
-        - Gastrointestinal: nausea, vomiting, diarrhea, constipation, abdominal pain, blood in stool
-        - Genitourinary: dysuria, frequency, urgency, hematuria
-        - Musculoskeletal: joint pain, swelling, stiffness, muscle weakness
-        - Neurological: dizziness, syncope, seizures, weakness, numbness, tingling
-        - Skin: rash, lesions, itching, color changes
-        - Psychiatric: anxiety, depression, sleep disturbance, mood changes
-        """;
-
-    public OpenAiClient(string? apiKey = null)
+    public OpenAiClient(AppConfig? config = null)
     {
-        // Reads from OPENAI_API_KEY by default rather than hardcoding it into
-        // the app the way process.env.REACT_APP_OPENAI_API_KEY got bundled
-        // into the extension's built JS (technically extractable from the
-        // built files). An env var on the clinical machine is a meaningfully
-        // better place for it - though for production you'll eventually want
-        // this behind your own backend rather than the desktop app holding
-        // an OpenAI key directly.
-        //
-        // Falls back to a local config file if the env var isn't visible -
-        // Windows environment variable propagation to already-running
-        // processes has proven unreliable on this machine (possibly due to
-        // IT-managed group policy on a domain-joined workstation), and a
-        // file this app reads directly sidesteps that class of problem
-        // entirely.
-        apiKey ??= Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-        apiKey ??= TryReadKeyFromConfigFile();
+        _cfg = config ?? AppConfig.Load();
 
-        if (string.IsNullOrWhiteSpace(apiKey))
+        // Only OpenAI endpoints need a key; a local model server usually doesn't.
+        var missing = new List<string>();
+        if (_cfg.ChatIsOpenAi && string.IsNullOrWhiteSpace(_cfg.ChatApiKey))
+            missing.Add("the chat model is OpenAI but no API key is set");
+        if (_cfg.AudioIsOpenAi && string.IsNullOrWhiteSpace(_cfg.AudioApiKey))
+            missing.Add("audio (dictation / Voice Analyzer) uses OpenAI but no API key is set");
+
+        if (missing.Count > 0)
         {
-            EnsureConfigTemplateExists();
+            AppConfig.EnsureTemplate();
             throw new InvalidOperationException(
-                $"No OpenAI API key found. Either set the OPENAI_API_KEY environment variable, " +
-                $"or open {ConfigFilePath} and paste your key into \"OpenAiApiKey\", then restart the app.");
+                $"MedScribe isn't configured - {string.Join("; ", missing)}. Set the OPENAI_API_KEY " +
+                $"environment variable, or open {AppConfig.FilePath} and fill in OpenAiApiKey, then restart. " +
+                $"To run against a local model instead, point ChatBaseUrl at LM Studio or Ollama in that file.");
         }
 
-        _http = new HttpClient();
-        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        _chatHttp = MakeClient(_cfg.ChatBaseUrl, _cfg.ChatApiKey);
+        _audioHttp = MakeClient(_cfg.AudioBaseUrl, _cfg.AudioApiKey);
     }
 
-    private static string ConfigFilePath =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MedScribeOS", "config.json");
-
-    private static string? TryReadKeyFromConfigFile()
+    private static HttpClient MakeClient(string baseUrl, string? apiKey)
     {
-        try
+        var http = new HttpClient
         {
-            if (!File.Exists(ConfigFilePath)) return null;
-            var json = File.ReadAllText(ConfigFilePath);
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("OpenAiApiKey", out var keyEl))
-            {
-                var key = keyEl.GetString();
-                return string.IsNullOrWhiteSpace(key) ? null : key;
-            }
-        }
-        catch
-        {
-            // Any read/parse failure is treated the same as "no key found" -
-            // the caller falls through to the clear error message instead.
-        }
-        return null;
-    }
-
-    /// <summary>Creates an empty template config file on first failure, so the fix is just "open this file and paste your key in" rather than needing to know the exact JSON shape from scratch.</summary>
-    private static void EnsureConfigTemplateExists()
-    {
-        try
-        {
-            var dir = Path.GetDirectoryName(ConfigFilePath)!;
-            Directory.CreateDirectory(dir);
-            if (!File.Exists(ConfigFilePath))
-            {
-                var template = JsonSerializer.Serialize(new { OpenAiApiKey = "" }, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(ConfigFilePath, template);
-            }
-        }
-        catch
-        {
-            // Best effort - if we can't write the template, the exception
-            // message above still tells the user the exact path to create.
-        }
+            BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/"),
+            // A local model on CPU can take a while for the first token.
+            Timeout = TimeSpan.FromMinutes(3),
+        };
+        if (!string.IsNullOrWhiteSpace(apiKey))
+            http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        return http;
     }
 
     /// <summary>Ports transcribe() - sends the recorded WAV to Whisper, then filters out hallucinated segments using Whisper's own confidence signals.</summary>
@@ -152,7 +79,7 @@ public sealed class OpenAiClient
         fileContent.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
 
         form.Add(fileContent, "file", Path.GetFileName(audioFilePath));
-        form.Add(new StringContent("whisper-1"), "model");
+        form.Add(new StringContent(_cfg.TranscribeModel), "model");
         form.Add(new StringContent("en"), "language");
         // verbose_json instead of plain text - this gives us per-segment
         // no_speech_prob and avg_logprob, which is how we filter out
@@ -160,12 +87,12 @@ public sealed class OpenAiClient
         // Whisper returns unconditionally.
         form.Add(new StringContent("verbose_json"), "response_format");
 
-        var response = await _http.PostAsync("https://api.openai.com/v1/audio/transcriptions", form);
+        var response = await _audioHttp.PostAsync("audio/transcriptions", form);
         var body = await response.Content.ReadAsStringAsync();
 
         if (!response.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException($"Whisper transcription failed: {body}");
+            throw new InvalidOperationException($"Transcription failed ({_cfg.TranscribeModel} @ {_cfg.AudioBaseUrl}): {body}");
         }
 
         return ExtractRealSpeechFromVerboseJson(body);
@@ -213,173 +140,98 @@ public sealed class OpenAiClient
         return string.Join(" ", keptSegments).Trim();
     }
 
-    /// <summary>Ports diarize() - splits a raw transcript into Doctor/Patient turns.</summary>
-    public async Task<List<ConversationTurn>> DiarizeAsync(string transcript)
-    {
-        var prompt = $$"""
-            You are an expert medical transcriptionist. Split this doctor-patient conversation transcript into individual speaker turns.
-            Identify who is speaking based on context: doctors ask clinical questions, give instructions, explain diagnoses; patients describe symptoms, answer questions, express concerns.
-
-            TRANSCRIPT:
-            {{transcript}}
-
-            Return ONLY a valid JSON object in this exact format (no markdown, no preamble):
-            {
-              "turns": [
-                { "speaker": "Doctor", "text": "..." },
-                { "speaker": "Patient", "text": "..." }
-              ]
-            }
-
-            Rules:
-            - Use ONLY "Doctor" or "Patient" as speaker values
-            - Doctor typically starts the conversation
-            - Preserve all original words exactly, do not paraphrase
-            """;
-
-        var json = await ChatJsonAsync(prompt);
-
-        using var doc = JsonDocument.Parse(json);
-        var turns = new List<ConversationTurn>();
-        if (doc.RootElement.TryGetProperty("turns", out var turnsEl))
-        {
-            foreach (var t in turnsEl.EnumerateArray())
-            {
-                var speaker = t.TryGetProperty("speaker", out var s) ? s.GetString() ?? "Doctor" : "Doctor";
-                var text = t.TryGetProperty("text", out var tx) ? tx.GetString() ?? "" : "";
-                if (!string.IsNullOrWhiteSpace(text))
-                {
-                    turns.Add(new ConversationTurn(speaker, text));
-                }
-            }
-        }
-
-        if (turns.Count == 0)
-        {
-            throw new InvalidOperationException("No speaker turns extracted - check audio quality.");
-        }
-
-        return turns;
-    }
-
     /// <summary>
-    /// Transcribes one live turn's audio AND labels its speaker in a single
-    /// call, using gpt-4o-transcribe-diarize's audio-based diarization
-    /// anchored to the enrolled doctor's voice (DoctorVoiceEnrollment) - this
-    /// is what actually distinguishes Doctor/Patient by VOICE instead of
-    /// guessing from sentence content, which is what made an earlier
-    /// text-based classifier unreliable regardless of which chat model ran
-    /// it. Any speaker the model doesn't match to "Doctor" is treated as
-    /// "Patient", since a visit is assumed to be exactly two parties. A
-    /// single clip can come back as more than one turn if a quick
-    /// back-and-forth happened within it.
+    /// Transcribes one live audio chunk AND diarizes it in a single call, using
+    /// gpt-4o-transcribe-diarize anchored to the enrolled doctor's voice
+    /// (DoctorVoiceEnrollment). Returns the model's segments *raw* - the caller
+    /// (<see cref="SpeakerAttributionRefiner"/>) resolves them to stable
+    /// conversation-wide Doctor/Patient roles, since a single chunk's labels
+    /// can't be trusted for identity on their own. One chunk can yield several
+    /// segments if a quick back-and-forth happened inside it.
     /// </summary>
-    public async Task<List<ConversationTurn>> TranscribeAndDiarizeTurnAsync(string audioFilePath, string doctorReferenceDataUrl)
+    /// <summary>True when the Voice Analyzer uses real (voice-anchored) diarization; false = local transcription only, roles inferred by turn-taking.</summary>
+    public bool DiarizationEnabled => _cfg.DiarizationEnabled;
+
+    public async Task<List<RawDiarizedSegment>> TranscribeAndDiarizeRawAsync(string audioFilePath, string? doctorReferenceDataUrl)
     {
         using var form = new MultipartFormDataContent();
         using var fileStream = File.OpenRead(audioFilePath);
         using var fileContent = new StreamContent(fileStream);
         fileContent.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
-
         form.Add(fileContent, "file", Path.GetFileName(audioFilePath));
-        form.Add(new StringContent("gpt-4o-transcribe-diarize"), "model");
-        form.Add(new StringContent("diarized_json"), "response_format");
-        form.Add(new StringContent("auto"), "chunking_strategy");
-        form.Add(new StringContent("Doctor"), "known_speaker_names[]");
-        form.Add(new StringContent(doctorReferenceDataUrl), "known_speaker_references[]");
 
-        var response = await _http.PostAsync("https://api.openai.com/v1/audio/transcriptions", form);
+        if (_cfg.DiarizationEnabled)
+        {
+            // Voice-anchored diarization (OpenAI): returns per-segment "speaker".
+            form.Add(new StringContent(_cfg.DiarizeModel), "model");
+            form.Add(new StringContent("diarized_json"), "response_format");
+            form.Add(new StringContent("auto"), "chunking_strategy");
+            if (!string.IsNullOrWhiteSpace(doctorReferenceDataUrl))
+            {
+                form.Add(new StringContent("Doctor"), "known_speaker_names[]");
+                form.Add(new StringContent(doctorReferenceDataUrl), "known_speaker_references[]");
+            }
+        }
+        else
+        {
+            // Offline mode: plain transcription. No "speaker" field, so the
+            // refiner falls back to turn-taking to assign Doctor/Patient.
+            form.Add(new StringContent(_cfg.TranscribeModel), "model");
+            form.Add(new StringContent("verbose_json"), "response_format");
+            form.Add(new StringContent("en"), "language");
+        }
+
+        var response = await _audioHttp.PostAsync("audio/transcriptions", form);
         var body = await response.Content.ReadAsStringAsync();
 
         if (!response.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException($"Live transcription+diarization failed: {body}");
+            var model = _cfg.DiarizationEnabled ? _cfg.DiarizeModel : _cfg.TranscribeModel;
+            throw new InvalidOperationException($"Live transcription failed ({model} @ {_cfg.AudioBaseUrl}): {body}");
         }
 
-        return ParseDiarizedSegments(body);
+        return ParseRawDiarizedSegments(body);
     }
 
-    private static List<ConversationTurn> ParseDiarizedSegments(string json)
+    private static List<RawDiarizedSegment> ParseRawDiarizedSegments(string json)
     {
         using var doc = JsonDocument.Parse(json);
-        var turns = new List<ConversationTurn>();
+        var segments = new List<RawDiarizedSegment>();
 
         if (!doc.RootElement.TryGetProperty("segments", out var segmentsEl))
-        {
-            return turns;
-        }
+            return segments;
 
         foreach (var segment in segmentsEl.EnumerateArray())
         {
             var text = segment.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "";
             if (string.IsNullOrWhiteSpace(text)) continue;
 
-            var speakerLabel = segment.TryGetProperty("speaker", out var s) ? s.GetString() ?? "" : "";
-            var speaker = speakerLabel.Equals("Doctor", StringComparison.OrdinalIgnoreCase) ? "Doctor" : "Patient";
+            // Skip Whisper hallucinations on the plain-transcription path
+            // (diarized_json has no these fields, so this is a no-op there).
+            var noSpeechProb = segment.TryGetProperty("no_speech_prob", out var nsp) && nsp.ValueKind == JsonValueKind.Number ? nsp.GetDouble() : 0;
+            var avgLogProb = segment.TryGetProperty("avg_logprob", out var alp) && alp.ValueKind == JsonValueKind.Number ? alp.GetDouble() : 0;
+            if (noSpeechProb > 0.5 || avgLogProb < -1.0) continue;
 
-            turns.Add(new ConversationTurn(speaker, text.Trim()));
+            var rawSpeaker = segment.TryGetProperty("speaker", out var s) ? s.GetString() ?? "" : "";
+            double? start = segment.TryGetProperty("start", out var st) && st.ValueKind == JsonValueKind.Number ? st.GetDouble() : null;
+            double? end = segment.TryGetProperty("end", out var en) && en.ValueKind == JsonValueKind.Number ? en.GetDouble() : null;
+
+            segments.Add(new RawDiarizedSegment(rawSpeaker, text.Trim(), start, end));
         }
 
-        return turns;
-    }
-
-    /// <summary>Ports the analyze() call - extracts structured HPI/ROS from speaker turns.</summary>
-    public async Task<HpiRosResult> ExtractHpiRosAsync(List<ConversationTurn> turns, string? template = null)
-    {
-        template ??= DefaultTemplate;
-        var formatted = string.Join("\n", turns.ConvertAll(t => $"{t.Speaker}: {t.Text}"));
-
-        var prompt = $$"""
-            You are a board-certified medical scribe. Analyze this doctor-patient conversation and extract structured clinical information.
-
-            ECW TEMPLATE TO FILL:
-            {{template}}
-
-            CONVERSATION:
-            {{formatted}}
-
-            Return ONLY valid JSON (no markdown, no preamble):
-            {
-              "hpi": {
-                "chief_complaint": "", "onset": "", "location": "", "duration": "", "character": "",
-                "severity": "", "aggravating_factors": "", "relieving_factors": "",
-                "associated_symptoms": "", "prior_episodes": "", "medications_tried": ""
-              },
-              "ros": {
-                "constitutional": "", "heent": "", "cardiovascular": "", "respiratory": "",
-                "gastrointestinal": "", "genitourinary": "", "musculoskeletal": "",
-                "neurological": "", "skin": "", "psychiatric": ""
-              },
-              "assessment": "",
-              "plan": "",
-              "additional_notes": ""
-            }
-            Use "Not discussed" for fields not mentioned. Be concise and clinically accurate.
-            """;
-
-        var json = await ChatJsonAsync(prompt);
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-
-        return new HpiRosResult(
-            Hpi: ParseStringDict(root, "hpi"),
-            Ros: ParseStringDict(root, "ros"),
-            Assessment: root.TryGetProperty("assessment", out var a) ? a.GetString() : null,
-            Plan: root.TryGetProperty("plan", out var p) ? p.GetString() : null,
-            AdditionalNotes: root.TryGetProperty("additional_notes", out var n) ? n.GetString() : null);
+        return segments;
     }
 
     /// <summary>
-    /// Template-driven port of <see cref="ExtractHpiRosAsync"/>: instead of the
-    /// hardcoded HPI/ROS field list, the sections/fields (and each field's
-    /// "prompt" guidance) come from the doctor's chosen <see cref="NoteTemplate"/>,
-    /// and the model is told to answer in exactly that shape. This is the hook
-    /// the spec's requirement 4 asks for - the doctor's schema shapes the output
-    /// rather than whatever was compiled in.
+    /// Extracts structured clinical information from the (speaker-tagged)
+    /// conversation into EXACTLY the shape of the doctor's chosen
+    /// <see cref="NoteTemplate"/> - sections, field keys, and per-field "prompt"
+    /// guidance all come from the template, so the output matches that doctor's
+    /// schema instead of a hardcoded HPI/ROS layout.
     /// </summary>
     public async Task<TemplateExtractionResult> ExtractStructuredAsync(List<ConversationTurn> turns, NoteTemplate template)
     {
-        var conversation = string.Join("\n", turns.Select(t => $"{t.Speaker}: {t.Text}"));
+        var conversation = string.Join("\n", turns.Select(t => $"{t.SpeakerLabel}: {t.Text}"));
 
         var templateLines = new List<string>();
         var schemaSections = new List<string>();
@@ -421,74 +273,83 @@ public sealed class OpenAiClient
     {
         var result = new TemplateExtractionResult();
 
-        JsonElement sectionsEl = default;
-        var haveSections = false;
+        // All JsonElement reads must happen while `doc` is alive - a JsonElement
+        // is just a cursor into the document, so touching one after dispose
+        // throws "Cannot access a disposed object". Everything below stays
+        // inside the using scope; on any parse failure every field falls back
+        // to "Not discussed".
         try
         {
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
+
             // Accept both { "sections": {...} } and a bare {...} of sections.
-            sectionsEl = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("sections", out var s) ? s : root;
-            haveSections = sectionsEl.ValueKind == JsonValueKind.Object;
+            var sectionsEl = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("sections", out var s) ? s : root;
+            var haveSections = sectionsEl.ValueKind == JsonValueKind.Object;
+
+            foreach (var section in template.Sections)
+            {
+                var map = new Dictionary<string, string>();
+                JsonElement secObj = default;
+                var haveSec = haveSections
+                              && sectionsEl.TryGetProperty(section.SectionKey, out secObj)
+                              && secObj.ValueKind == JsonValueKind.Object;
+
+                foreach (var field in section.Fields)
+                {
+                    map[field.FieldKey] =
+                        haveSec && secObj.TryGetProperty(field.FieldKey, out var fv) && fv.ValueKind == JsonValueKind.String
+                            ? (fv.GetString() ?? "").Trim()
+                            : "Not discussed";
+                }
+                result.Sections[section.SectionKey] = map;
+            }
+
+            return result;
         }
         catch (JsonException)
         {
-            // fall through - every field defaults to "Not discussed" below
+            return FillNotDiscussed(result, template);
         }
+    }
 
+    private static TemplateExtractionResult FillNotDiscussed(TemplateExtractionResult result, NoteTemplate template)
+    {
         foreach (var section in template.Sections)
         {
             var map = new Dictionary<string, string>();
-            JsonElement secObj = default;
-            var haveSec = haveSections
-                          && sectionsEl.TryGetProperty(section.SectionKey, out secObj)
-                          && secObj.ValueKind == JsonValueKind.Object;
-
             foreach (var field in section.Fields)
-            {
-                map[field.FieldKey] =
-                    haveSec && secObj.TryGetProperty(field.FieldKey, out var fv) && fv.ValueKind == JsonValueKind.String
-                        ? (fv.GetString() ?? "").Trim()
-                        : "Not discussed";
-            }
+                map[field.FieldKey] = "Not discussed";
             result.Sections[section.SectionKey] = map;
         }
-
         return result;
     }
 
-    private static Dictionary<string, string> ParseStringDict(JsonElement root, string propertyName)
-    {
-        var result = new Dictionary<string, string>();
-        if (root.TryGetProperty(propertyName, out var section))
-        {
-            foreach (var prop in section.EnumerateObject())
-            {
-                result[prop.Name] = prop.Value.GetString() ?? "";
-            }
-        }
-        return result;
-    }
-
-    /// <summary>Shared GPT-4o JSON-mode call used by both DiarizeAsync and ExtractHpiRosAsync.</summary>
+    /// <summary>
+    /// Chat-completion call for <see cref="ExtractStructuredAsync"/>. Targets
+    /// whatever <see cref="AppConfig.ChatBaseUrl"/> / <see cref="AppConfig.ChatModel"/>
+    /// name - OpenAI, or a local LM Studio / Ollama server.
+    /// </summary>
     private async Task<string> ChatJsonAsync(string prompt)
     {
-        var requestBody = new
+        var requestBody = new Dictionary<string, object?>
         {
-            model = "gpt-4o",
-            messages = new[] { new { role = "user", content = prompt } },
-            response_format = new { type = "json_object" },
-            max_tokens = 3000,
-            temperature = 0.1
+            ["model"] = _cfg.ChatModel,
+            ["messages"] = new[] { new { role = "user", content = prompt } },
+            ["max_tokens"] = 3000,
+            ["temperature"] = 0.1,
         };
+        // Some local models reject JSON mode - AppConfig.ChatJsonMode disables it.
+        if (_cfg.ChatJsonMode)
+            requestBody["response_format"] = new { type = "json_object" };
 
         var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
-        var response = await _http.PostAsync("https://api.openai.com/v1/chat/completions", content);
+        var response = await _chatHttp.PostAsync("chat/completions", content);
         var body = await response.Content.ReadAsStringAsync();
 
         if (!response.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException($"OpenAI request failed: {body}");
+            throw new InvalidOperationException($"Chat request failed ({_cfg.ChatModel} @ {_cfg.ChatBaseUrl}): {body}");
         }
 
         using var doc = JsonDocument.Parse(body);
@@ -498,6 +359,18 @@ public sealed class OpenAiClient
             .GetProperty("content")
             .GetString();
 
-        return messageContent ?? "{}";
+        // Local models often wrap JSON in ```json fences even in JSON mode.
+        return StripCodeFence(messageContent ?? "{}");
+    }
+
+    private static string StripCodeFence(string s)
+    {
+        var t = s.Trim();
+        if (!t.StartsWith("```")) return t;
+        var firstNewline = t.IndexOf('\n');
+        if (firstNewline < 0) return t;
+        t = t[(firstNewline + 1)..];
+        var lastFence = t.LastIndexOf("```", StringComparison.Ordinal);
+        return (lastFence >= 0 ? t[..lastFence] : t).Trim();
     }
 }

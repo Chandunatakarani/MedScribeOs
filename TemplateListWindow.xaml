@@ -6,7 +6,7 @@
         Height="600" Width="640"
         Background="{StaticResource BgDarkBrush}"
         WindowStartupLocation="CenterOwner"
-        FontFamily="Segoe UI">
+        FontFamily="Segoe UI" FontSize="13">
     <Grid Margin="24">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -18,7 +18,7 @@
         <TextBlock Grid.Row="0" Text="📋 Note Templates"
                    Foreground="{StaticResource TextPrimaryBrush}" FontSize="20" FontWeight="Bold"/>
         <TextBlock Grid.Row="1" x:Name="SubHeader" Margin="0,4,0,0"
-                   Foreground="{StaticResource TextSecondaryBrush}" FontSize="12"/>
+                   Foreground="{StaticResource TextSecondaryBrush}" FontSize="13"/>
 
         <ScrollViewer Grid.Row="2" Margin="0,16,0,0" VerticalScrollBarVisibility="Auto">
             <StackPanel x:Name="ListPanel"/>

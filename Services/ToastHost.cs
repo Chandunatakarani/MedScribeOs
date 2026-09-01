@@ -62,7 +62,7 @@ public sealed class ToastHost : ItemsControl
         {
             Text = GlyphFor(toast.Kind),
             Foreground = accent,
-            FontSize = 14,
+            FontSize = 16,
             FontWeight = FontWeights.Bold,
             Margin = new Thickness(0, 0, 10, 0),
             VerticalAlignment = VerticalAlignment.Top,
@@ -78,16 +78,16 @@ public sealed class ToastHost : ItemsControl
             Padding = new Thickness(6, 0, 0, 0),
             Cursor = System.Windows.Input.Cursors.Hand,
             VerticalAlignment = VerticalAlignment.Top,
-            FontSize = 11,
+            FontSize = 12,
         };
         DockPanel.SetDock(close, Dock.Right);
 
         var message = new TextBlock
         {
             Text = toast.Message,
-            Foreground = Brush("TextPrimaryBrush", Colors.White),
+            Foreground = Brush("TextPrimaryBrush", Color.FromRgb(0x1C, 0x1C, 0x1E)),
             TextWrapping = TextWrapping.Wrap,
-            FontSize = 12.5,
+            FontSize = 13.5,
         };
 
         var body = new DockPanel { LastChildFill = true };
@@ -97,15 +97,15 @@ public sealed class ToastHost : ItemsControl
 
         var card = new Border
         {
-            Background = Brush("BgCard2Brush", Color.FromRgb(0x1F, 0x1F, 0x1F)),
-            BorderBrush = accent,
+            Background = Brush("BgCardBrush", Colors.White),
+            BorderBrush = Brush("BorderBrush2", Color.FromRgb(0xD2, 0xD2, 0xD7)),
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(8),
-            Padding = new Thickness(12, 10, 12, 10),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(14, 11, 14, 11),
             Margin = new Thickness(0, 8, 0, 0),
             MaxWidth = 400,
             Child = body,
-            Effect = new DropShadowEffect { Color = Colors.Black, BlurRadius = 14, ShadowDepth = 0, Opacity = 0.5 },
+            Effect = new DropShadowEffect { Color = Colors.Black, BlurRadius = 24, ShadowDepth = 0, Opacity = 0.14 },
             Cursor = System.Windows.Input.Cursors.Hand,
         };
 
@@ -142,10 +142,10 @@ public sealed class ToastHost : ItemsControl
 
     private Brush AccentFor(ToastKind kind) => kind switch
     {
-        ToastKind.Error => Brush("RedBrush", Color.FromRgb(0xFF, 0x45, 0x60)),
-        ToastKind.Warning => new SolidColorBrush(Color.FromRgb(0xE0, 0xB3, 0x41)),
-        ToastKind.Success => Brush("TextPrimaryBrush", Colors.White),
-        _ => Brush("BorderBrush2", Color.FromRgb(0x3D, 0x3D, 0x3D)),
+        ToastKind.Error => Brush("RedBrush", Color.FromRgb(0xFF, 0x3B, 0x30)),          // Apple red
+        ToastKind.Warning => new SolidColorBrush(Color.FromRgb(0xFF, 0x95, 0x00)),      // Apple orange
+        ToastKind.Success => new SolidColorBrush(Color.FromRgb(0x34, 0xC7, 0x59)),      // Apple green
+        _ => Brush("AccentBrush", Color.FromRgb(0x00, 0x7A, 0xFF)),                     // Apple blue
     };
 
     /// <summary>App brush by key, with a hard-coded fallback so the control still renders if used outside the styled app.</summary>
