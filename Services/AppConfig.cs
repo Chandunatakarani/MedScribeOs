@@ -29,11 +29,20 @@ public sealed class AppConfig
     /// <summary>Send response_format={type:json_object}. Turn off if a local model rejects it.</summary>
     public bool ChatJsonMode { get; private init; } = true;
 
+    /// <summary>HTTP timeout for a chat/extraction call. Local models on CPU can be slow, so the default is generous for a non-OpenAI endpoint.</summary>
+    public int ChatTimeoutSeconds { get; private init; } = 180;
+
     // ── audio (OpenAI, or a Whisper-compatible server for dictation only) ───
     public string AudioBaseUrl { get; private init; } = OpenAiV1;
     public string? AudioApiKey { get; private init; }
     public string TranscribeModel { get; private init; } = "whisper-1";
     public string DiarizeModel { get; private init; } = "gpt-4o-transcribe-diarize";
+
+    /// <summary>HTTP timeout for one transcription request. A local model's first call has to load the model into RAM, which can take minutes on CPU - hence a large default for a non-OpenAI endpoint.</summary>
+    public int AudioTimeoutSeconds { get; private init; } = 180;
+
+    /// <summary>File Analyzer splits recordings longer than this into chunks of this length so each request stays fast and under the size limit.</summary>
+    public int AudioChunkSeconds { get; private init; } = 45;
 
     /// <summary>
     /// "openai" (default) = the Voice Analyzer uses gpt-4o-transcribe-diarize
@@ -115,19 +124,23 @@ public sealed class AppConfig
 
         var env = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
         var sharedKey = Str("OpenAiApiKey") ?? (string.IsNullOrWhiteSpace(env) ? null : env.Trim());
+        var chatBaseUrl = (Str("ChatBaseUrl") ?? OpenAiV1).TrimEnd('/');
         var audioBaseUrl = (Str("AudioBaseUrl") ?? OpenAiV1).TrimEnd('/');
         var audioIsOpenAi = IsOpenAi(audioBaseUrl);
 
         return new AppConfig
         {
-            ChatBaseUrl = (Str("ChatBaseUrl") ?? OpenAiV1).TrimEnd('/'),
+            ChatBaseUrl = chatBaseUrl,
             ChatModel = Str("ChatModel") ?? "gpt-4o",
             ChatApiKey = Str("ChatApiKey") ?? sharedKey,
             ChatJsonMode = Bool("ChatJsonMode", true),
+            ChatTimeoutSeconds = (int)(Num("ChatTimeoutSeconds") ?? (IsOpenAi(chatBaseUrl) ? 180 : 600)),
             AudioBaseUrl = audioBaseUrl,
             AudioApiKey = Str("AudioApiKey") ?? sharedKey,
             TranscribeModel = Str("TranscribeModel") ?? "whisper-1",
             DiarizeModel = Str("DiarizeModel") ?? "gpt-4o-transcribe-diarize",
+            AudioTimeoutSeconds = (int)(Num("AudioTimeoutSeconds") ?? (audioIsOpenAi ? 180 : 1200)),
+            AudioChunkSeconds = Math.Max(10, (int)(Num("AudioChunkSeconds") ?? 45)),
             AudioDiarization = Str("AudioDiarization") ?? "openai",
             AudioPrompt = Str("AudioPrompt") ?? DefaultAudioPrompt,
             AudioMaxNoSpeechProb = Num("AudioMaxNoSpeechProb") ?? 0.6,
@@ -155,17 +168,21 @@ public sealed class AppConfig
                     "If a local model rejects strict JSON mode, set ChatJsonMode = false.",
                     "DICTATION can run local: point AudioBaseUrl at a faster-whisper server (e.g. Speaches on http://localhost:8000/v1) and set TranscribeModel to its model id.",
                     "VOICE ANALYZER: gpt-4o-transcribe-diarize (speaker-anchored) is OpenAI only. To test fully offline set AudioDiarization = off - it then uses plain local transcription and infers Doctor/Patient from turn-taking (no voice enrollment needed, less accurate on who-said-what).",
-                    "ACCURACY: use TranscribeModel = deepdml/faster-whisper-large-v3-turbo-ct2 (or Systran/faster-whisper-medium) - the 'small' model is poor on medical terms. AudioPrompt primes clinical vocabulary. Loosen AudioMinAvgLogProb (e.g. -3.0) if words are being dropped."
+                    "ACCURACY: use TranscribeModel = deepdml/faster-whisper-large-v3-turbo-ct2 (or Systran/faster-whisper-medium) - the 'small' model is poor on medical terms. AudioPrompt primes clinical vocabulary. Loosen AudioMinAvgLogProb (e.g. -3.0) if words are being dropped.",
+                    "TIMEOUTS: a local model's FIRST request loads it into RAM (minutes on CPU). AudioTimeoutSeconds / ChatTimeoutSeconds default high for a local endpoint; raise them further, or lower AudioChunkSeconds (e.g. 30), if you still hit timeouts."
                 },
                 OpenAiApiKey = "",
                 ChatBaseUrl = OpenAiV1,
                 ChatModel = "gpt-4o",
                 ChatApiKey = "",
                 ChatJsonMode = true,
+                ChatTimeoutSeconds = 180,
                 AudioBaseUrl = OpenAiV1,
                 AudioApiKey = "",
                 TranscribeModel = "whisper-1",
                 DiarizeModel = "gpt-4o-transcribe-diarize",
+                AudioTimeoutSeconds = 180,
+                AudioChunkSeconds = 45,
                 AudioDiarization = "openai",
                 AudioPrompt = "",
                 AudioMaxNoSpeechProb = 0.6,

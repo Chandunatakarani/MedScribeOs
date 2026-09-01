@@ -190,6 +190,9 @@
                         <TextBlock x:Name="TxtFileStatus"
                                    Text="Load a .txt transcript, an audio recording (.wav / .mp3 / .m4a), or a .pdf / .docx document — then pick a template and Analyze."
                                    Foreground="{StaticResource TextSecondaryBrush}" Margin="0,10,0,0" TextWrapping="Wrap" FontSize="12"/>
+                        <ProgressBar x:Name="FileProgress" Height="6" Minimum="0" Maximum="100" Margin="0,10,0,0"
+                                     Background="{StaticResource BgDarkBrush}" BorderThickness="0"
+                                     Foreground="{StaticResource AccentBrush}" Visibility="Collapsed"/>
                         <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                             <TextBlock Text="Template:" Style="{StaticResource LabelStyle}" VerticalAlignment="Center" Margin="0,0,8,0"/>
                             <ComboBox x:Name="FileTemplatePicker" Width="240" DisplayMemberPath="Name"/>

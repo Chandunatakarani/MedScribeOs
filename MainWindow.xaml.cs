@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using MedScribeOS.Models;
 using MedScribeOS.Services;
 // Same WPF/WinForms overlap as DictationEngine.cs - pin TextBox to the WPF one.
@@ -33,10 +35,17 @@ public partial class MainWindow : Window
     // section key -> (field key -> the editable TextBox showing that field)
     private readonly Dictionary<string, Dictionary<string, TextBox>> _sectionBoxes = new();
 
+    // File Analyzer progress: a bar (determinate for chunked audio, indeterminate
+    // otherwise) plus a running mm:ss so a long transcription never looks frozen.
+    private readonly DispatcherTimer _opTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private DateTime _opStart;
+    private string _opLabel = "";
+
     public MainWindow()
     {
         InitializeComponent();
         GlassChrome.Apply(this);
+        _opTimer.Tick += (_, _) => RefreshOpStatus();
 
         // Selecting the initial tab has to happen AFTER InitializeComponent
         // finishes, not via IsChecked="True" in the XAML - setting IsChecked
@@ -241,13 +250,11 @@ public partial class MainWindow : Window
             if (DocumentText.IsAudio(path))
             {
                 if (_openAi == null) { Notify.Error("Transcription isn't configured (see config.json)."); return; }
-                TxtFileStatus.Text = "Transcribing audio… long recordings can take a few minutes.";
-                Notify.Info("Transcribing the recording…");
-                text = await _openAi.TranscribeAsync(path);
+                text = await TranscribeAudioWithProgressAsync(path);
             }
             else if (DocumentText.IsDocument(path))
             {
-                TxtFileStatus.Text = "Reading file…";
+                BeginOp("Reading file…");
                 text = await Task.Run(() => DocumentText.FromFile(path));
             }
             else
@@ -258,28 +265,72 @@ public partial class MainWindow : Window
 
             text = text.Trim();
             TxtFileTranscript.Text = text;
-            TxtFileName.Text = System.IO.Path.GetFileName(path);
+            TxtFileName.Text = Path.GetFileName(path);
 
             if (text.Length == 0)
             {
-                TxtFileStatus.Text = "That file produced no text. If it's a scanned PDF, it has no selectable text to read.";
+                EndOp("That file produced no text. If it's a scanned PDF, it has no selectable text to read.");
                 Notify.Warning("No readable text found in that file.");
             }
             else
             {
-                TxtFileStatus.Text = $"Loaded {text.Length:N0} characters. Review the transcript, pick a template, then Analyze.";
-                Notify.Success($"Loaded {System.IO.Path.GetFileName(path)}.");
+                EndOp($"Loaded {text.Length:N0} characters. Review the transcript, pick a template, then Analyze.");
+                Notify.Success($"Loaded {Path.GetFileName(path)}.");
             }
         }
         catch (Exception ex)
         {
-            TxtFileStatus.Text = $"Couldn't load that file: {DescribeError(ex)}";
+            EndOp($"Couldn't load that file: {DescribeError(ex)}");
             Notify.Error($"Couldn't load the file: {DescribeError(ex)}");
         }
         finally
         {
             BtnChooseFile.IsEnabled = true;
             BtnFileAnalyze.IsEnabled = true;
+        }
+    }
+
+    /// <summary>
+    /// Short clips: one call with an indeterminate bar + running mm:ss. Longer
+    /// recordings: decode + split into ~1 min chunks and transcribe them one by
+    /// one, so the bar shows real "chunk N of M" progress.
+    /// </summary>
+    private async Task<string> TranscribeAudioWithProgressAsync(string path)
+    {
+        var openAi = _openAi ?? throw new InvalidOperationException("Transcription isn't configured.");
+        var chunkSeconds = openAi.AudioChunkSeconds;
+
+        TimeSpan duration;
+        try { duration = await Task.Run(() => AudioFile.Duration(path)); }
+        catch { duration = TimeSpan.Zero; }
+
+        if (duration <= TimeSpan.FromSeconds(Math.Max(90, chunkSeconds * 2)))
+        {
+            BeginOp("Transcribing audio… (first run also loads the model — can take a few minutes)");
+            Notify.Info("Transcribing the recording…");
+            return await openAi.TranscribeAsync(path);
+        }
+
+        BeginOp("Preparing audio…");
+        var chunks = await Task.Run(() => AudioFile.SplitToWavChunks(path, chunkSeconds));
+        Notify.Info($"Transcribing {chunks.Count} segments…");
+        var parts = new List<string>();
+        try
+        {
+            for (var i = 0; i < chunks.Count; i++)
+            {
+                UpdateOp($"Transcribing segment {i + 1} of {chunks.Count}…", (double)i / chunks.Count);
+                parts.Add((await openAi.TranscribeAsync(chunks[i])).Trim());
+            }
+            UpdateOp("Finishing…", 1.0);
+            return string.Join(" ", parts.Where(p => p.Length > 0));
+        }
+        finally
+        {
+            foreach (var c in chunks)
+            {
+                try { File.Delete(c); } catch { /* best effort */ }
+            }
         }
     }
 
@@ -305,23 +356,64 @@ public partial class MainWindow : Window
         _activeTemplate = template;
 
         BtnFileAnalyze.IsEnabled = false;
+        BtnChooseFile.IsEnabled = false;
+        BeginOp($"Analyzing with the \"{template.Name}\" template…");
         Notify.Info($"Analyzing with the \"{template.Name}\" template…");
         try
         {
             _extraction = await _openAi.ExtractStructuredFromTextAsync(text, template);
             RenderExtraction();
             PanelHpiRos.Visibility = Visibility.Visible;
+            EndOp($"Done. Review every field in \"{template.Name}\" before injecting.");
             Notify.Success($"\"{template.Name}\" draft ready - review every field before injecting.");
         }
         catch (Exception ex)
         {
+            EndOp($"Analysis failed: {DescribeError(ex)}");
             MessageBox.Show($"Analysis failed: {DescribeError(ex)}", "MedScribeAI", MessageBoxButton.OK, MessageBoxImage.Error);
             Notify.Error($"Analysis failed: {DescribeError(ex)}");
         }
         finally
         {
             BtnFileAnalyze.IsEnabled = true;
+            BtnChooseFile.IsEnabled = true;
         }
+    }
+
+    // ── File Analyzer progress bar + running mm:ss ──────────────────────────
+    private void BeginOp(string label, double? fraction = null)
+    {
+        _opLabel = label;
+        if (!_opTimer.IsEnabled) { _opStart = DateTime.Now; _opTimer.Start(); }
+
+        FileProgress.Visibility = Visibility.Visible;
+        if (fraction is { } f)
+        {
+            FileProgress.IsIndeterminate = false;
+            FileProgress.Value = Math.Clamp(f, 0, 1) * 100;
+        }
+        else
+        {
+            FileProgress.IsIndeterminate = true;
+        }
+        RefreshOpStatus();
+    }
+
+    private void UpdateOp(string label, double fraction) => BeginOp(label, fraction);
+
+    private void EndOp(string finalStatus)
+    {
+        _opTimer.Stop();
+        FileProgress.Visibility = Visibility.Collapsed;
+        FileProgress.IsIndeterminate = false;
+        FileProgress.Value = 0;
+        TxtFileStatus.Text = finalStatus;
+    }
+
+    private void RefreshOpStatus()
+    {
+        var elapsed = DateTime.Now - _opStart;
+        TxtFileStatus.Text = $"{_opLabel}   {(int)elapsed.TotalMinutes}:{elapsed.Seconds:D2}";
     }
 
     // ── Voice Analyzer: Start / End Conversation ─────────────────────────────

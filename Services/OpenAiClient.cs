@@ -53,17 +53,21 @@ public sealed class OpenAiClient
                 $"To run against a local model instead, point ChatBaseUrl at LM Studio or Ollama in that file.");
         }
 
-        _chatHttp = MakeClient(_cfg.ChatBaseUrl, _cfg.ChatApiKey);
-        _audioHttp = MakeClient(_cfg.AudioBaseUrl, _cfg.AudioApiKey);
+        _chatHttp = MakeClient(_cfg.ChatBaseUrl, _cfg.ChatApiKey, _cfg.ChatTimeoutSeconds);
+        _audioHttp = MakeClient(_cfg.AudioBaseUrl, _cfg.AudioApiKey, _cfg.AudioTimeoutSeconds);
     }
 
-    private static HttpClient MakeClient(string baseUrl, string? apiKey)
+    /// <summary>Length File Analyzer splits long recordings into, per config.</summary>
+    public int AudioChunkSeconds => _cfg.AudioChunkSeconds;
+
+    private static HttpClient MakeClient(string baseUrl, string? apiKey, int timeoutSeconds)
     {
         var http = new HttpClient
         {
             BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/"),
-            // A local model on CPU can take a while for the first token.
-            Timeout = TimeSpan.FromMinutes(3),
+            // Local models on CPU are slow, and the first request also loads the
+            // model into RAM - so this is generous and config-driven.
+            Timeout = TimeSpan.FromSeconds(Math.Max(30, timeoutSeconds)),
         };
         if (!string.IsNullOrWhiteSpace(apiKey))
             http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
