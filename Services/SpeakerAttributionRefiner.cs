@@ -131,7 +131,8 @@ public sealed class SpeakerAttributionRefiner
 
     private static SpeakerRole Flip(SpeakerRole r) => r == SpeakerRole.Doctor ? SpeakerRole.Patient : SpeakerRole.Doctor;
 
-    private static bool IsBackchannel(string text)
+    // internal: TranscriptTurns applies the same rule to uploaded recordings
+    internal static bool IsBackchannel(string text)
     {
         var t = new string(text.Where(c => !char.IsPunctuation(c)).ToArray()).Trim().ToLowerInvariant();
         if (t.Length == 0) return true;

@@ -23,6 +23,13 @@ public sealed class NoteTemplate
     public List<TemplateSection> Sections { get; set; } = new();
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// The styled ComboBox renders its closed-box selection via SelectionBoxItem,
+    /// which falls back to ToString() rather than DisplayMemberPath - without
+    /// this it displays "MedScribeOS.Models.NoteTemplate".
+    /// </summary>
+    public override string ToString() => Name;
 }
 
 /// <summary>A section of the note - "HPI", "ROS", or any custom name the doctor types.</summary>

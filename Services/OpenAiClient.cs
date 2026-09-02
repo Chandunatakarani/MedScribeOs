@@ -76,6 +76,18 @@ public sealed class OpenAiClient
 
     /// <summary>Ports transcribe() - sends the recorded WAV to Whisper, then filters out hallucinated segments using Whisper's own confidence signals.</summary>
     public async Task<string> TranscribeAsync(string audioFilePath)
+        => ExtractRealSpeechFromVerboseJson(await PostPlainTranscriptionAsync(audioFilePath));
+
+    /// <summary>
+    /// Same plain transcription call, but keeps Whisper's per-segment
+    /// timestamps (hallucinations already filtered). The File Analyzer feeds
+    /// these to <see cref="TranscriptTurns"/> to split an uploaded recording
+    /// into Doctor/Patient turns from silence gaps - no extra model call.
+    /// </summary>
+    public async Task<List<RawDiarizedSegment>> TranscribeSegmentsAsync(string audioFilePath)
+        => ParseRawDiarizedSegments(await PostPlainTranscriptionAsync(audioFilePath));
+
+    private async Task<string> PostPlainTranscriptionAsync(string audioFilePath)
     {
         using var form = new MultipartFormDataContent();
         using var fileStream = File.OpenRead(audioFilePath);
@@ -93,6 +105,17 @@ public sealed class OpenAiClient
         // Prime the model with clinical vocabulary so it mis-hears fewer terms.
         if (!string.IsNullOrWhiteSpace(_cfg.AudioPrompt))
             form.Add(new StringContent(_cfg.AudioPrompt), "prompt");
+        // Strip silence before it reaches the model - long quiet stretches are
+        // the main trigger for Whisper's repetition loops. Local servers
+        // (speaches) support this; OpenAI's API doesn't accept the field.
+        if (_cfg.AudioVadFilter && !_cfg.AudioIsOpenAi)
+            form.Add(new StringContent("true"), "vad_filter");
+        // Per-word timestamps (local only): lets ParseRawDiarizedSegments split
+        // a segment at real pauses, because with VAD one Whisper segment often
+        // spans both speakers ("…your age? Sure, 39, I'm a male. Okay and…") -
+        // segment-level gaps alone can't separate those into turns.
+        if (!_cfg.AudioIsOpenAi)
+            form.Add(new StringContent("word"), "timestamp_granularities[]");
 
         var response = await _audioHttp.PostAsync("audio/transcriptions", form);
         var body = await response.Content.ReadAsStringAsync();
@@ -102,7 +125,7 @@ public sealed class OpenAiClient
             throw new InvalidOperationException($"Transcription failed ({_cfg.TranscribeModel} @ {_cfg.AudioBaseUrl}): {body}");
         }
 
-        return ExtractRealSpeechFromVerboseJson(body);
+        return body;
     }
 
     /// <summary>
@@ -132,10 +155,60 @@ public sealed class OpenAiClient
             var text = segment.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "";
             if (string.IsNullOrWhiteSpace(text)) continue;
             if (IsLikelyHallucination(segment)) continue;
-            keptSegments.Add(text.Trim());
+            keptSegments.Add(CollapseRepetitions(text.Trim()));
         }
 
         return string.Join(" ", keptSegments).Trim();
+    }
+
+    /// <summary>
+    /// De-loops a segment that passed the confidence filters but still carries
+    /// a partial stutter ("when did this chest pain, pain, pain, pain…"):
+    /// any phrase of 1-8 words repeated 3+ times back-to-back is collapsed to
+    /// one occurrence. Real speech repeats things at most twice ("no, no"),
+    /// which is deliberately left alone.
+    /// </summary>
+    internal static string CollapseRepetitions(string text)
+    {
+        var tokens = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (tokens.Length < 3) return text;
+
+        static string Norm(string s) => new(Array.FindAll(s.ToLowerInvariant().ToCharArray(), char.IsLetterOrDigit));
+
+        // longest phrases first, so a whole repeated clause collapses before
+        // its individual words are considered
+        for (var n = 8; n >= 1; n--)
+        {
+            if (tokens.Length < n * 3) continue;
+            var output = new List<string>(tokens.Length);
+            var i = 0;
+            while (i < tokens.Length)
+            {
+                var repeats = 1;
+                while (i + (repeats + 1) * n <= tokens.Length)
+                {
+                    var same = true;
+                    for (var k = 0; k < n && same; k++)
+                        same = Norm(tokens[i + k]) == Norm(tokens[i + repeats * n + k]);
+                    if (!same) break;
+                    repeats++;
+                }
+
+                if (repeats >= 3)
+                {
+                    for (var k = 0; k < n; k++) output.Add(tokens[i + k]);
+                    i += repeats * n;
+                }
+                else
+                {
+                    output.Add(tokens[i]);
+                    i++;
+                }
+            }
+            tokens = output.ToArray();
+        }
+
+        return string.Join(" ", tokens);
     }
 
     /// <summary>
@@ -148,7 +221,13 @@ public sealed class OpenAiClient
     {
         var noSpeechProb = segment.TryGetProperty("no_speech_prob", out var nsp) && nsp.ValueKind == JsonValueKind.Number ? nsp.GetDouble() : 0;
         var avgLogProb = segment.TryGetProperty("avg_logprob", out var alp) && alp.ValueKind == JsonValueKind.Number ? alp.GetDouble() : 0;
-        return noSpeechProb > _cfg.AudioMaxNoSpeechProb || avgLogProb < _cfg.AudioMinAvgLogProb;
+        // High compression ratio = the text is mostly the same bytes over and
+        // over - a repetition loop ("a, a, a, a…"), Whisper's classic failure
+        // on silence/noise. Real speech sits near 1; loops measure 4-20.
+        var compressionRatio = segment.TryGetProperty("compression_ratio", out var cr) && cr.ValueKind == JsonValueKind.Number ? cr.GetDouble() : 1;
+        return noSpeechProb > _cfg.AudioMaxNoSpeechProb
+               || avgLogProb < _cfg.AudioMinAvgLogProb
+               || compressionRatio > _cfg.AudioMaxCompressionRatio;
     }
 
     private static string MimeForAudio(string path) => Path.GetExtension(path).ToLowerInvariant() switch
@@ -194,9 +273,12 @@ public sealed class OpenAiClient
         {
             // Offline mode: plain transcription. No "speaker" field, so the
             // refiner falls back to turn-taking to assign Doctor/Patient.
+            // Word timestamps let the parser split a segment at real pauses,
+            // which is what the turn-taking fallback keys off.
             form.Add(new StringContent(_cfg.TranscribeModel), "model");
             form.Add(new StringContent("verbose_json"), "response_format");
             form.Add(new StringContent("en"), "language");
+            form.Add(new StringContent("word"), "timestamp_granularities[]");
             if (!string.IsNullOrWhiteSpace(_cfg.AudioPrompt))
                 form.Add(new StringContent(_cfg.AudioPrompt), "prompt");
         }
@@ -234,10 +316,55 @@ public sealed class OpenAiClient
             double? start = segment.TryGetProperty("start", out var st) && st.ValueKind == JsonValueKind.Number ? st.GetDouble() : null;
             double? end = segment.TryGetProperty("end", out var en) && en.ValueKind == JsonValueKind.Number ? en.GetDouble() : null;
 
-            segments.Add(new RawDiarizedSegment(rawSpeaker, text.Trim(), start, end));
+            // With word timestamps present, split the segment at real pauses -
+            // one Whisper segment routinely spans a question AND its answer,
+            // and the turn-taking logic needs those as separate utterances.
+            if (segment.TryGetProperty("words", out var wordsEl)
+                && wordsEl.ValueKind == JsonValueKind.Array
+                && wordsEl.GetArrayLength() > 0)
+            {
+                segments.AddRange(SplitByWordGaps(rawSpeaker, wordsEl));
+            }
+            else
+            {
+                segments.Add(new RawDiarizedSegment(rawSpeaker, CollapseRepetitions(text.Trim()), start, end));
+            }
         }
 
         return segments;
+    }
+
+    /// <summary>A pause this long between words starts a new utterance (well under the turn-taking thresholds, so no hand-off can hide inside one utterance).</summary>
+    private const double WordSplitGapSeconds = 0.3;
+
+    private static IEnumerable<RawDiarizedSegment> SplitByWordGaps(string rawSpeaker, JsonElement wordsEl)
+    {
+        var text = new StringBuilder();
+        double? curStart = null;
+        double curEnd = 0;
+
+        foreach (var w in wordsEl.EnumerateArray())
+        {
+            var word = w.TryGetProperty("word", out var wd) ? wd.GetString() ?? "" : "";
+            if (string.IsNullOrWhiteSpace(word)) continue;
+            double? start = w.TryGetProperty("start", out var st) && st.ValueKind == JsonValueKind.Number ? st.GetDouble() : null;
+            double? end = w.TryGetProperty("end", out var en) && en.ValueKind == JsonValueKind.Number ? en.GetDouble() : null;
+
+            if (text.Length > 0 && start is { } s && s - curEnd >= WordSplitGapSeconds)
+            {
+                yield return new RawDiarizedSegment(rawSpeaker, CollapseRepetitions(text.ToString().Trim()), curStart, curEnd);
+                text.Clear();
+                curStart = null;
+            }
+
+            if (text.Length > 0) text.Append(' ');
+            text.Append(word.Trim());
+            curStart ??= start;
+            if (end is { } e) curEnd = e;
+        }
+
+        if (text.Length > 0)
+            yield return new RawDiarizedSegment(rawSpeaker, CollapseRepetitions(text.ToString().Trim()), curStart, curEnd);
     }
 
     /// <summary>

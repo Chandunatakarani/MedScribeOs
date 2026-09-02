@@ -63,6 +63,22 @@ public sealed class AppConfig
     public double AudioMaxNoSpeechProb { get; private init; } = 0.6;
 
     /// <summary>
+    /// Segments whose text compresses better than this ratio are dropped as
+    /// repetition loops ("a, a, a, a…") - the same signal Whisper itself uses
+    /// to declare a decoding failure (its internal default is 2.4). Looping
+    /// segments observed in practice score 4-20.
+    /// </summary>
+    public double AudioMaxCompressionRatio { get; private init; } = 2.4;
+
+    /// <summary>
+    /// Ask a local Whisper server to run voice-activity detection first, so
+    /// long silences never reach the model - silence is the main trigger for
+    /// repetition loops. Only sent to non-OpenAI endpoints (OpenAI's API does
+    /// not accept the parameter).
+    /// </summary>
+    public bool AudioVadFilter { get; private init; } = true;
+
+    /// <summary>
     /// Segments with a lower average token log-probability than this are dropped
     /// as likely hallucinations. Small local models score systematically lower
     /// than OpenAI Whisper, so the default is looser for a local endpoint
@@ -144,6 +160,8 @@ public sealed class AppConfig
             AudioDiarization = Str("AudioDiarization") ?? "openai",
             AudioPrompt = Str("AudioPrompt") ?? DefaultAudioPrompt,
             AudioMaxNoSpeechProb = Num("AudioMaxNoSpeechProb") ?? 0.6,
+            AudioMaxCompressionRatio = Num("AudioMaxCompressionRatio") ?? 2.4,
+            AudioVadFilter = Bool("AudioVadFilter", true),
             // looser hallucination cutoff for small local models
             AudioMinAvgLogProb = Num("AudioMinAvgLogProb") ?? (audioIsOpenAi ? -1.0 : -2.2),
         };

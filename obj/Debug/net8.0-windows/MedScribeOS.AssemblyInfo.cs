@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("MedScribeOS")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+09f0f606687f6b72f0b9be91c741f96d93d400d2")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3156c9796fd6ba87e284c173591d511c82ca471b")]
 [assembly: System.Reflection.AssemblyProductAttribute("MedScribeOS")]
 [assembly: System.Reflection.AssemblyTitleAttribute("MedScribeOS")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

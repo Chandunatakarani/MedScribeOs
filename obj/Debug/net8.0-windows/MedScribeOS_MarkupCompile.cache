@@ -4,16 +4,16 @@
 winexe
 C#
 .cs
-C:\Users\A\MedScribeOs\obj\Debug\net8.0-windows\
+C:\Users\Horizon\MedScribeOs\obj\Debug\net8.0-windows\
 MedScribeOS
 none
 false
-TRACE;DEBUG;NET;NET8_0;NETCOREAPP
-C:\Users\A\MedScribeOs\App.xaml
+TRACE;DEBUG;NET;NET8_0;NETCOREAPP;WINDOWS;WINDOWS7_0;NET5_0_OR_GREATER;NET6_0_OR_GREATER;NET7_0_OR_GREATER;NET8_0_OR_GREATER;NETCOREAPP3_0_OR_GREATER;NETCOREAPP3_1_OR_GREATER;WINDOWS7_0_OR_GREATER
+C:\Users\Horizon\MedScribeOs\App.xaml
 51121430608
 
-27-1502561269
-225-119305507
+30-443893319
+225327679807
 LoginWindow.xaml;MainWindow.xaml;Styles.xaml;TemplateEditorWindow.xaml;TemplateListWindow.xaml;
 
 False

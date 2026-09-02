@@ -78,17 +78,26 @@ No cloud calls. Extraction runs on Ollama; dictation + Voice Analyzer run on a l
 Set up the two local servers first:
 
 ```powershell
-# 1. LLM
+# 1. LLM - and keep it loaded between requests (otherwise every Analyze
+#    after 5 idle minutes pays a ~1 min model reload)
 ollama pull qwen2.5:3b
+[Environment]::SetEnvironmentVariable('OLLAMA_KEEP_ALIVE','2h','User')
+# then quit Ollama from the tray and relaunch it so the setting takes effect
 
-# 2. Speech-to-text server (in a NEW PowerShell window, after Docker Desktop says "Engine running")
-docker run -d --name speaches -p 8000:8000 ghcr.io/speaches-ai/speaches:latest-cpu
+# 2. Speech-to-text server (in a NEW PowerShell window, after Docker Desktop says "Engine running").
+#    WHISPER__TTL keeps the model warm for an hour; the volume keeps downloaded
+#    models across container recreates; --restart brings it back after a reboot.
+docker run -d --name speaches -p 8000:8000 --restart unless-stopped `
+  -e WHISPER__TTL=3600 -v speaches-cache:/home/ubuntu/.cache/huggingface `
+  ghcr.io/speaches-ai/speaches:latest-cpu
 
-# 3. Pre-download the Whisper model (takes 1-2 min, no progress shown)
+# 3. Pre-download the Whisper model (takes 1-2 min, no progress shown).
+#    Stick with faster-whisper-small: the distil variants are faster but fall
+#    into repetition loops ("a, a, a…") on real visit-length audio.
 Invoke-RestMethod -Method Post -Uri "http://localhost:8000/v1/models/Systran/faster-whisper-small"
 ```
 
-Later sessions: `ollama serve` runs automatically; `docker start speaches` brings the STT server back (no re-download).
+Later sessions: `ollama serve` runs automatically; the speaches container auto-starts with Docker Desktop (or `docker start speaches` if you created it without `--restart`).
 
 ---
 
@@ -188,7 +197,7 @@ Nothing syncs anywhere. Delete these files to reset.
 | Sign-in: *"Couldn't reach the sign-in server"* | You're not on the HFMG network / VPN. |
 | *"The AI provider isn't configured"* on startup | `config.json` missing an API key for an OpenAI endpoint. Do step 5. |
 | Analyze fails: *"Chat request failed … @ http://localhost:11434/v1"* | Ollama isn't running or the model isn't pulled — `ollama pull qwen2.5:3b`, then `ollama list`. |
-| Live transcription fails: *"Model 'Systran/faster-whisper-small' is not installed locally"* | Run the `Invoke-RestMethod -Method Post …/v1/models/…` from step 4. |
+| Live transcription fails: *"Model '…' is not installed locally"* | Run the `Invoke-RestMethod -Method Post …/v1/models/<the model in your config.json>` from step 4. |
 | Live transcription fails: connection refused on `:8000` | Speaches container isn't up — `docker ps`; if missing, `docker start speaches` or re-run `docker run …`. |
 | `docker : term not recognized` | Open a **new** terminal after installing Docker Desktop; make sure it says "Engine running". |
 | First dictation/analysis hangs ~30–60 s | Local Whisper model downloading on first use, or first Ollama load. One-time. |

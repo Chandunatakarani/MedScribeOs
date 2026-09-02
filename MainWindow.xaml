@@ -203,9 +203,28 @@
 
                 <Border Grid.Row="1" Style="{StaticResource CardBorderStyle}">
                     <DockPanel>
-                        <TextBlock DockPanel.Dock="Top" Text="TRANSCRIPT — editable before analysis" Style="{StaticResource LabelStyle}" Margin="0,0,0,8"/>
-                        <TextBox x:Name="TxtFileTranscript" AcceptsReturn="True" TextWrapping="Wrap"
-                                 VerticalContentAlignment="Top" VerticalScrollBarVisibility="Auto"/>
+                        <DockPanel DockPanel.Dock="Top" LastChildFill="False" Margin="0,0,0,8">
+                            <TextBlock x:Name="TxtFileViewLabel" Text="TRANSCRIPT — editable before analysis"
+                                       Style="{StaticResource LabelStyle}" VerticalAlignment="Center"/>
+                            <Button x:Name="BtnFileViewToggle" DockPanel.Dock="Right" Content="✏️ Edit as text"
+                                    Style="{StaticResource GhostButtonStyle}" Padding="10,4" FontSize="12"
+                                    Visibility="Collapsed" Click="BtnFileViewToggle_Click"/>
+                        </DockPanel>
+                        <Grid>
+                            <TextBox x:Name="TxtFileTranscript" AcceptsReturn="True" TextWrapping="Wrap"
+                                     VerticalContentAlignment="Top" VerticalScrollBarVisibility="Auto"/>
+                            <!-- Same two-sided chat as the Voice Analyzer (shared bubble template +
+                                 flip handler); shown instead of the TextBox once turns exist. -->
+                            <ListBox x:Name="FileChatList"
+                                     ItemsSource="{Binding FileTurns, RelativeSource={RelativeSource AncestorType=Window}}"
+                                     ItemTemplate="{StaticResource ChatBubbleTemplate}"
+                                     ItemContainerStyle="{StaticResource ChatItemStyle}"
+                                     Background="Transparent" BorderThickness="0"
+                                     HorizontalContentAlignment="Stretch"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                     Visibility="Collapsed"/>
+                        </Grid>
                     </DockPanel>
                 </Border>
             </Grid>

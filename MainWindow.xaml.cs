@@ -29,6 +29,9 @@ public partial class MainWindow : Window
     /// <summary>Live conversation, bound to the chat ListBox. Turns are appended as each is transcribed; the item is replaced (not mutated) when a speaker is flipped.</summary>
     public ObservableCollection<ConversationTurn> ChatTurns { get; } = new();
 
+    /// <summary>File Analyzer conversation, bound to its own chat ListBox - same bubbles, same ⇄ flip correction as the live chat.</summary>
+    public ObservableCollection<ConversationTurn> FileTurns { get; } = new();
+
     // Filled by Analyze; both are shaped by whichever template the doctor picked.
     private NoteTemplate? _activeTemplate;
     private TemplateExtractionResult? _extraction;
@@ -37,9 +40,12 @@ public partial class MainWindow : Window
 
     // File Analyzer progress: a bar (determinate for chunked audio, indeterminate
     // otherwise) plus a running mm:ss so a long transcription never looks frozen.
+    // _opEtaSeconds, when known (chunk timings, or PerfStats rates learned from
+    // earlier runs), adds a live "~m:ss left" countdown next to the elapsed time.
     private readonly DispatcherTimer _opTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     private DateTime _opStart;
     private string _opLabel = "";
+    private double? _opEtaSeconds;
 
     public MainWindow()
     {
@@ -184,7 +190,7 @@ public partial class MainWindow : Window
 
     private async void BtnEnrollVoice_Click(object sender, RoutedEventArgs e)
     {
-        BtnEnrollVoice.IsEnabled = false;
+        using var busy = BusyButton.Begin(BtnEnrollVoice, "Recording 8s…");
         BtnStartConvo.IsEnabled = false;
         TxtEnrollStatus.Text = "🔴 Recording reference — read a sentence or two out loud for 8 seconds…";
 
@@ -201,7 +207,6 @@ public partial class MainWindow : Window
         }
         finally
         {
-            BtnEnrollVoice.IsEnabled = true;
             BtnStartConvo.IsEnabled = true;
         }
     }
@@ -242,38 +247,60 @@ public partial class MainWindow : Window
         if (dlg.ShowDialog() != true) return;
 
         var path = dlg.FileName;
-        BtnChooseFile.IsEnabled = false;
+        using var busy = BusyButton.Begin(BtnChooseFile, "Loading…");
         BtnFileAnalyze.IsEnabled = false;
         try
         {
             string text;
+            List<ConversationTurn>? turns = null;
+
             if (DocumentText.IsAudio(path))
             {
                 if (_openAi == null) { Notify.Error("Transcription isn't configured (see config.json)."); return; }
-                text = await TranscribeAudioWithProgressAsync(path);
-            }
-            else if (DocumentText.IsDocument(path))
-            {
-                BeginOp("Reading file…");
-                text = await Task.Run(() => DocumentText.FromFile(path));
+                var segments = await TranscribeAudioWithProgressAsync(path);
+                turns = TranscriptTurns.FromSegments(segments);
+                text = turns.Count > 0
+                    ? TranscriptTurns.ToLabeledText(turns)
+                    : string.Join(" ", segments.Select(s => s.Text.Trim()));
             }
             else
             {
-                Notify.Warning("Unsupported file type. Use .txt, .wav/.mp3/.m4a, or .pdf/.docx.");
-                return;
+                if (DocumentText.IsDocument(path))
+                {
+                    BeginOp("Reading file…");
+                    text = await Task.Run(() => DocumentText.FromFile(path));
+                }
+                else
+                {
+                    Notify.Warning("Unsupported file type. Use .txt, .wav/.mp3/.m4a, or .pdf/.docx.");
+                    return;
+                }
+                // "Doctor: ..." / "Pt: ..." style transcripts become bubbles too
+                turns = TranscriptTurns.FromLabeledText(text);
             }
 
             text = text.Trim();
             TxtFileTranscript.Text = text;
             TxtFileName.Text = Path.GetFileName(path);
 
-            if (text.Length == 0)
+            if (turns is { Count: > 0 })
             {
+                SetFileTurns(turns);
+                ShowFileTurnsView();
+                EndOp($"{turns.Count} turns detected. Flip any wrong speaker with ⇄, then pick a template and Analyze.");
+                Notify.Success($"Loaded {Path.GetFileName(path)} — {turns.Count} turns.");
+            }
+            else if (text.Length == 0)
+            {
+                FileTurns.Clear(); // stale turns from a previous file must not linger
+                ShowFileTextView();
                 EndOp("That file produced no text. If it's a scanned PDF, it has no selectable text to read.");
                 Notify.Warning("No readable text found in that file.");
             }
             else
             {
+                FileTurns.Clear();
+                ShowFileTextView();
                 EndOp($"Loaded {text.Length:N0} characters. Review the transcript, pick a template, then Analyze.");
                 Notify.Success($"Loaded {Path.GetFileName(path)}.");
             }
@@ -285,8 +312,61 @@ public partial class MainWindow : Window
         }
         finally
         {
-            BtnChooseFile.IsEnabled = true;
             BtnFileAnalyze.IsEnabled = true;
+        }
+    }
+
+    // ── File Analyzer: turns view <-> raw text view ─────────────────────────
+
+    private void SetFileTurns(List<ConversationTurn> turns)
+    {
+        FileTurns.Clear();
+        foreach (var t in turns) FileTurns.Add(t);
+    }
+
+    /// <summary>True while the bubbles (not the raw TextBox) are what the user sees - Analyze then uses the corrected turns.</summary>
+    private bool FileTurnsViewActive => FileChatList.Visibility == Visibility.Visible;
+
+    private void ShowFileTurnsView()
+    {
+        TxtFileTranscript.Visibility = Visibility.Collapsed;
+        FileChatList.Visibility = Visibility.Visible;
+        BtnFileViewToggle.Visibility = Visibility.Visible;
+        BtnFileViewToggle.Content = "✏️ Edit as text";
+        TxtFileViewLabel.Text = "CONVERSATION — flip any wrong speaker with ⇄";
+    }
+
+    private void ShowFileTextView()
+    {
+        TxtFileTranscript.Visibility = Visibility.Visible;
+        FileChatList.Visibility = Visibility.Collapsed;
+        // the toggle only makes sense when there are turns to go back to
+        BtnFileViewToggle.Visibility = FileTurns.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        BtnFileViewToggle.Content = "💬 View as turns";
+        TxtFileViewLabel.Text = "TRANSCRIPT — editable before analysis";
+    }
+
+    private void BtnFileViewToggle_Click(object sender, RoutedEventArgs e)
+    {
+        if (FileTurnsViewActive)
+        {
+            // turns -> text: flatten the (possibly flipped) turns for free editing
+            TxtFileTranscript.Text = TranscriptTurns.ToLabeledText(FileTurns);
+            ShowFileTextView();
+        }
+        else
+        {
+            // text -> turns: re-parse the edited labels
+            var turns = TranscriptTurns.FromLabeledText(TxtFileTranscript.Text);
+            if (turns is { Count: > 0 })
+            {
+                SetFileTurns(turns);
+                ShowFileTurnsView();
+            }
+            else
+            {
+                Notify.Warning("Couldn't find \"Doctor:\" / \"Patient:\" labels in the text - staying in text view.");
+            }
         }
     }
 
@@ -294,36 +374,60 @@ public partial class MainWindow : Window
     /// Short clips: one call with an indeterminate bar + running mm:ss. Longer
     /// recordings: decode + split into ~1 min chunks and transcribe them one by
     /// one, so the bar shows real "chunk N of M" progress.
+    ///
+    /// Returns the timestamped segments (chunk offsets already applied, so
+    /// times are absolute across the whole recording) - TranscriptTurns splits
+    /// them into Doctor/Patient turns for free. The ETA starts from the rate
+    /// PerfStats learned on this machine and, for chunked runs, corrects
+    /// itself from the actual per-chunk times as they land.
     /// </summary>
-    private async Task<string> TranscribeAudioWithProgressAsync(string path)
+    private async Task<List<RawDiarizedSegment>> TranscribeAudioWithProgressAsync(string path)
     {
         var openAi = _openAi ?? throw new InvalidOperationException("Transcription isn't configured.");
         var chunkSeconds = openAi.AudioChunkSeconds;
+        var started = DateTime.Now;
 
         TimeSpan duration;
         try { duration = await Task.Run(() => AudioFile.Duration(path)); }
         catch { duration = TimeSpan.Zero; }
 
+        // rate learned from previous runs -> estimated total seconds (null on first ever run)
+        var eta = PerfStats.TranscribeSecPerAudioSec is { } rate && duration > TimeSpan.Zero
+            ? rate * duration.TotalSeconds
+            : (double?)null;
+
         if (duration <= TimeSpan.FromSeconds(Math.Max(90, chunkSeconds * 2)))
         {
-            BeginOp("Transcribing audio… (first run also loads the model — can take a few minutes)");
+            BeginOp(eta is null
+                ? "Transcribing audio… (first run also loads the model — can take a few minutes)"
+                : "Transcribing audio…", etaSeconds: eta);
             Notify.Info("Transcribing the recording…");
-            return await openAi.TranscribeAsync(path);
+            var result = await openAi.TranscribeSegmentsAsync(path);
+            if (duration > TimeSpan.Zero) PerfStats.ObserveTranscribe(duration, DateTime.Now - started);
+            return result;
         }
 
-        BeginOp("Preparing audio…");
+        BeginOp("Preparing audio…", etaSeconds: eta);
         var chunks = await Task.Run(() => AudioFile.SplitToWavChunks(path, chunkSeconds));
         Notify.Info($"Transcribing {chunks.Count} segments…");
-        var parts = new List<string>();
+        var all = new List<RawDiarizedSegment>();
         try
         {
             for (var i = 0; i < chunks.Count; i++)
             {
-                UpdateOp($"Transcribing segment {i + 1} of {chunks.Count}…", (double)i / chunks.Count);
-                parts.Add((await openAi.TranscribeAsync(chunks[i])).Trim());
+                UpdateOp($"Transcribing segment {i + 1} of {chunks.Count}…", (double)i / chunks.Count, eta);
+                var offset = (double)i * chunkSeconds; // chunks are cut at exact multiples of chunkSeconds
+                foreach (var seg in await openAi.TranscribeSegmentsAsync(chunks[i]))
+                    all.Add(seg with { StartSeconds = seg.StartSeconds + offset, EndSeconds = seg.EndSeconds + offset });
+
+                // re-estimate the total from the chunks actually done - after a
+                // couple of chunks this beats any stored rate
+                var perChunk = (DateTime.Now - started).TotalSeconds / (i + 1);
+                eta = perChunk * chunks.Count;
             }
-            UpdateOp("Finishing…", 1.0);
-            return string.Join(" ", parts.Where(p => p.Length > 0));
+            UpdateOp("Finishing…", 1.0, eta);
+            if (duration > TimeSpan.Zero) PerfStats.ObserveTranscribe(duration, DateTime.Now - started);
+            return all;
         }
         finally
         {
@@ -342,7 +446,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        var text = TxtFileTranscript.Text?.Trim() ?? "";
+        // The turns view (with the user's ⇄ corrections) is the better source
+        // when it's active - the extraction prompt then knows who said what,
+        // exactly like the Voice Analyzer path. Otherwise the raw text is used.
+        var useTurns = FileTurnsViewActive && FileTurns.Count > 0;
+        var text = useTurns ? TranscriptTurns.ToLabeledText(FileTurns) : TxtFileTranscript.Text?.Trim() ?? "";
         if (text.Length == 0)
         {
             Notify.Warning("Load a file or paste a transcript first.");
@@ -355,13 +463,18 @@ public partial class MainWindow : Window
         }
         _activeTemplate = template;
 
-        BtnFileAnalyze.IsEnabled = false;
+        using var busy = BusyButton.Begin(BtnFileAnalyze, "Analyzing…");
         BtnChooseFile.IsEnabled = false;
-        BeginOp($"Analyzing with the \"{template.Name}\" template…");
+        var eta = PerfStats.ChatCharsPerSec is { } rate ? text.Length / rate : (double?)null;
+        BeginOp($"Analyzing with the \"{template.Name}\" template…", etaSeconds: eta);
         Notify.Info($"Analyzing with the \"{template.Name}\" template…");
+        var started = DateTime.Now;
         try
         {
-            _extraction = await _openAi.ExtractStructuredFromTextAsync(text, template);
+            _extraction = useTurns
+                ? await _openAi.ExtractStructuredAsync(FileTurns.ToList(), template)
+                : await _openAi.ExtractStructuredFromTextAsync(text, template);
+            PerfStats.ObserveChat(text.Length, DateTime.Now - started);
             RenderExtraction();
             PanelHpiRos.Visibility = Visibility.Visible;
             EndOp($"Done. Review every field in \"{template.Name}\" before injecting.");
@@ -375,15 +488,15 @@ public partial class MainWindow : Window
         }
         finally
         {
-            BtnFileAnalyze.IsEnabled = true;
             BtnChooseFile.IsEnabled = true;
         }
     }
 
-    // ── File Analyzer progress bar + running mm:ss ──────────────────────────
-    private void BeginOp(string label, double? fraction = null)
+    // ── File Analyzer progress bar + running mm:ss + ETA countdown ──────────
+    private void BeginOp(string label, double? fraction = null, double? etaSeconds = null)
     {
         _opLabel = label;
+        _opEtaSeconds = etaSeconds;
         if (!_opTimer.IsEnabled) { _opStart = DateTime.Now; _opTimer.Start(); }
 
         FileProgress.Visibility = Visibility.Visible;
@@ -399,11 +512,12 @@ public partial class MainWindow : Window
         RefreshOpStatus();
     }
 
-    private void UpdateOp(string label, double fraction) => BeginOp(label, fraction);
+    private void UpdateOp(string label, double fraction, double? etaSeconds = null) => BeginOp(label, fraction, etaSeconds);
 
     private void EndOp(string finalStatus)
     {
         _opTimer.Stop();
+        _opEtaSeconds = null;
         FileProgress.Visibility = Visibility.Collapsed;
         FileProgress.IsIndeterminate = false;
         FileProgress.Value = 0;
@@ -413,8 +527,18 @@ public partial class MainWindow : Window
     private void RefreshOpStatus()
     {
         var elapsed = DateTime.Now - _opStart;
-        TxtFileStatus.Text = $"{_opLabel}   {(int)elapsed.TotalMinutes}:{elapsed.Seconds:D2}";
+        var line = $"{_opLabel}   {Mmss(elapsed)}";
+        if (_opEtaSeconds is { } eta)
+        {
+            var remaining = eta - elapsed.TotalSeconds;
+            line += remaining > 1
+                ? $"  ·  ~{Mmss(TimeSpan.FromSeconds(remaining))} left"
+                : "  ·  almost done…";
+        }
+        TxtFileStatus.Text = line;
     }
+
+    private static string Mmss(TimeSpan t) => $"{(int)t.TotalMinutes}:{t.Seconds:D2}";
 
     // ── Voice Analyzer: Start / End Conversation ─────────────────────────────
     private void BtnStartConvo_Click(object sender, RoutedEventArgs e)
@@ -461,7 +585,7 @@ public partial class MainWindow : Window
 
     private async void BtnEndConvo_Click(object sender, RoutedEventArgs e)
     {
-        BtnEndConvo.IsEnabled = false;
+        using var busy = BusyButton.Begin(BtnEndConvo, "Finishing…");
         _livePreview?.Stop();
         MicLevelBar.Visibility = Visibility.Collapsed;
         MicLevelBar.Value = 0;
@@ -471,6 +595,8 @@ public partial class MainWindow : Window
         {
             TxtConvoStatus.Text = "Nothing recorded, or the AI provider isn't configured.";
             Notify.Error("Couldn't transcribe - the AI provider isn't configured. Check config.json and restart.");
+            busy.Dispose();
+            BtnEndConvo.IsEnabled = false;
             BtnStartConvo.IsEnabled = true;
             TemplatePicker.IsEnabled = true;
             BtnManageTemplates.IsEnabled = true;
@@ -507,6 +633,10 @@ public partial class MainWindow : Window
         }
         finally
         {
+            // restore the button's normal face first, then park it disabled -
+            // End Conversation stays off until the next Start.
+            busy.Dispose();
+            BtnEndConvo.IsEnabled = false;
             BtnStartConvo.IsEnabled = true;
             TemplatePicker.IsEnabled = true;
             BtnManageTemplates.IsEnabled = true;
@@ -524,17 +654,22 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Per-bubble correction: flip a turn between Doctor and Patient. Replaces
-    /// the (immutable) item in ChatTurns so the bound list re-renders that bubble
-    /// on the other side. This also feeds the corrected labels into Analyze.
+    /// the (immutable) item in its collection so the bound list re-renders that
+    /// bubble on the other side. Shared by the live chat and the File Analyzer
+    /// chat (both use the same bubble template); the corrected labels feed
+    /// straight into Analyze.
     /// </summary>
     private void FlipSpeaker_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not ConversationTurn turn) return;
-        var i = ChatTurns.IndexOf(turn);
-        if (i < 0) return;
 
         var flipped = turn.Speaker == SpeakerRole.Doctor ? SpeakerRole.Patient : SpeakerRole.Doctor;
-        ChatTurns[i] = turn with { Speaker = flipped };
+
+        var i = ChatTurns.IndexOf(turn);
+        if (i >= 0) { ChatTurns[i] = turn with { Speaker = flipped }; return; }
+
+        i = FileTurns.IndexOf(turn);
+        if (i >= 0) FileTurns[i] = turn with { Speaker = flipped };
     }
 
     // ── Voice Analyzer: Analyze → template sections ─────────────────────────
@@ -561,11 +696,14 @@ public partial class MainWindow : Window
         }
         _activeTemplate = template;
 
-        BtnAnalyze.IsEnabled = false;
+        using var busy = BusyButton.Begin(BtnAnalyze, "Analyzing…");
         Notify.Info($"Analyzing conversation with the \"{template.Name}\" template…");
+        var sourceChars = ChatTurns.Sum(t => t.Text.Length);
+        var started = DateTime.Now;
         try
         {
             _extraction = await _openAi.ExtractStructuredAsync(ChatTurns.ToList(), template);
+            PerfStats.ObserveChat(sourceChars, DateTime.Now - started);
             RenderExtraction();
             PanelHpiRos.Visibility = Visibility.Visible;
             Notify.Success($"\"{template.Name}\" draft ready - review every field before injecting.");
@@ -574,10 +712,6 @@ public partial class MainWindow : Window
         {
             MessageBox.Show($"Analysis failed: {DescribeError(ex)}", "MedScribeAI", MessageBoxButton.OK, MessageBoxImage.Error);
             Notify.Error($"Analysis failed: {DescribeError(ex)}");
-        }
-        finally
-        {
-            BtnAnalyze.IsEnabled = true;
         }
     }
 
