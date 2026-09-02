@@ -45,6 +45,14 @@ public sealed class AppConfig
     public int AudioChunkSeconds { get; private init; } = 45;
 
     /// <summary>
+    /// How many chunk transcriptions to run at once in File Analyzer. Parallel
+    /// requests cut wall-time a lot against a cloud endpoint; against a
+    /// CPU-bound local model they mostly just contend for the same cores, so
+    /// the default there is 1.
+    /// </summary>
+    public int AudioMaxParallel { get; private init; } = 1;
+
+    /// <summary>
     /// "openai" (default) = the Voice Analyzer uses gpt-4o-transcribe-diarize
     /// with the enrolled doctor voice. "off" = plain local transcription only;
     /// Doctor/Patient is inferred from turn-taking (works fully offline, less
@@ -157,6 +165,7 @@ public sealed class AppConfig
             DiarizeModel = Str("DiarizeModel") ?? "gpt-4o-transcribe-diarize",
             AudioTimeoutSeconds = (int)(Num("AudioTimeoutSeconds") ?? (audioIsOpenAi ? 180 : 1200)),
             AudioChunkSeconds = Math.Max(10, (int)(Num("AudioChunkSeconds") ?? 45)),
+            AudioMaxParallel = Math.Clamp((int)(Num("AudioMaxParallel") ?? (audioIsOpenAi ? 4 : 1)), 1, 12),
             AudioDiarization = Str("AudioDiarization") ?? "openai",
             AudioPrompt = Str("AudioPrompt") ?? DefaultAudioPrompt,
             AudioMaxNoSpeechProb = Num("AudioMaxNoSpeechProb") ?? 0.6,
@@ -187,7 +196,8 @@ public sealed class AppConfig
                     "DICTATION can run local: point AudioBaseUrl at a faster-whisper server (e.g. Speaches on http://localhost:8000/v1) and set TranscribeModel to its model id.",
                     "VOICE ANALYZER: gpt-4o-transcribe-diarize (speaker-anchored) is OpenAI only. To test fully offline set AudioDiarization = off - it then uses plain local transcription and infers Doctor/Patient from turn-taking (no voice enrollment needed, less accurate on who-said-what).",
                     "ACCURACY: use TranscribeModel = deepdml/faster-whisper-large-v3-turbo-ct2 (or Systran/faster-whisper-medium) - the 'small' model is poor on medical terms. AudioPrompt primes clinical vocabulary. Loosen AudioMinAvgLogProb (e.g. -3.0) if words are being dropped.",
-                    "TIMEOUTS: a local model's FIRST request loads it into RAM (minutes on CPU). AudioTimeoutSeconds / ChatTimeoutSeconds default high for a local endpoint; raise them further, or lower AudioChunkSeconds (e.g. 30), if you still hit timeouts."
+                    "TIMEOUTS: a local model's FIRST request loads it into RAM (minutes on CPU). AudioTimeoutSeconds / ChatTimeoutSeconds default high for a local endpoint; raise them further, or lower AudioChunkSeconds (e.g. 30), if you still hit timeouts.",
+                    "SPEED: AudioMaxParallel transcribes that many chunks at once (default 4 for OpenAI, 1 for local - parallel barely helps a CPU-bound local model)."
                 },
                 OpenAiApiKey = "",
                 ChatBaseUrl = OpenAiV1,
@@ -201,6 +211,7 @@ public sealed class AppConfig
                 DiarizeModel = "gpt-4o-transcribe-diarize",
                 AudioTimeoutSeconds = 180,
                 AudioChunkSeconds = 45,
+                AudioMaxParallel = 4,
                 AudioDiarization = "openai",
                 AudioPrompt = "",
                 AudioMaxNoSpeechProb = 0.6,

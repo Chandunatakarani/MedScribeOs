@@ -60,6 +60,9 @@ public sealed class OpenAiClient
     /// <summary>Length File Analyzer splits long recordings into, per config.</summary>
     public int AudioChunkSeconds => _cfg.AudioChunkSeconds;
 
+    /// <summary>How many chunk transcriptions File Analyzer runs concurrently, per config.</summary>
+    public int AudioMaxParallel => _cfg.AudioMaxParallel;
+
     private static HttpClient MakeClient(string baseUrl, string? apiKey, int timeoutSeconds)
     {
         var http = new HttpClient

@@ -1,15 +1,15 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\A\\MedScribeOs\\MedScribeOS.csproj": {}
+    "c:\\Users\\A\\MedScribeOs\\MedScribeOS_jc42klwp_wpftmp.csproj": {}
   },
   "projects": {
-    "C:\\Users\\A\\MedScribeOs\\MedScribeOS.csproj": {
+    "c:\\Users\\A\\MedScribeOs\\MedScribeOS_jc42klwp_wpftmp.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\A\\MedScribeOs\\MedScribeOS.csproj",
+        "projectUniqueName": "c:\\Users\\A\\MedScribeOs\\MedScribeOS_jc42klwp_wpftmp.csproj",
         "projectName": "MedScribeOS",
-        "projectPath": "C:\\Users\\A\\MedScribeOs\\MedScribeOS.csproj",
+        "projectPath": "c:\\Users\\A\\MedScribeOs\\MedScribeOS_jc42klwp_wpftmp.csproj",
         "packagesPath": "C:\\Users\\A\\.nuget\\packages\\",
         "outputPath": "C:\\Users\\A\\MedScribeOs\\obj\\",
         "projectStyle": "PackageReference",

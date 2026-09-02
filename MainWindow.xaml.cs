@@ -409,25 +409,44 @@ public partial class MainWindow : Window
 
         BeginOp("Preparing audio…", etaSeconds: eta);
         var chunks = await Task.Run(() => AudioFile.SplitToWavChunks(path, chunkSeconds));
-        Notify.Info($"Transcribing {chunks.Count} segments…");
-        var all = new List<RawDiarizedSegment>();
+        var maxParallel = Math.Clamp(openAi.AudioMaxParallel, 1, chunks.Count);
+        Notify.Info($"Transcribing {chunks.Count} segments" + (maxParallel > 1 ? $", {maxParallel} at a time…" : "…"));
+
+        // Each chunk -> its segments, shifted by the chunk's offset so times are
+        // absolute across the whole recording. Slotted back by index to keep
+        // recording order; up to maxParallel chunks transcribe concurrently.
+        var perChunk = Enumerable.Range(0, chunks.Count).Select(_ => new List<RawDiarizedSegment>()).ToArray();
+        var completed = 0;
+        using var gate = new SemaphoreSlim(maxParallel);
+
+        async Task TranscribeChunk(int i)
+        {
+            await gate.WaitAsync();
+            try
+            {
+                var offset = (double)i * chunkSeconds; // chunks are cut at exact multiples of chunkSeconds
+                var segs = await openAi.TranscribeSegmentsAsync(chunks[i]);
+                perChunk[i] = segs
+                    .Select(seg => seg with { StartSeconds = seg.StartSeconds + offset, EndSeconds = seg.EndSeconds + offset })
+                    .ToList();
+            }
+            finally
+            {
+                gate.Release();
+                var done = Interlocked.Increment(ref completed);
+                // elapsed already reflects the parallel speed-up, so scaling it
+                // to the full count keeps the ETA sane for any maxParallel
+                var est = (DateTime.Now - started).TotalSeconds * chunks.Count / done;
+                Dispatcher.Invoke(() => UpdateOp($"Transcribed {done} of {chunks.Count} segments…", (double)done / chunks.Count, est));
+            }
+        }
+
         try
         {
-            for (var i = 0; i < chunks.Count; i++)
-            {
-                UpdateOp($"Transcribing segment {i + 1} of {chunks.Count}…", (double)i / chunks.Count, eta);
-                var offset = (double)i * chunkSeconds; // chunks are cut at exact multiples of chunkSeconds
-                foreach (var seg in await openAi.TranscribeSegmentsAsync(chunks[i]))
-                    all.Add(seg with { StartSeconds = seg.StartSeconds + offset, EndSeconds = seg.EndSeconds + offset });
-
-                // re-estimate the total from the chunks actually done - after a
-                // couple of chunks this beats any stored rate
-                var perChunk = (DateTime.Now - started).TotalSeconds / (i + 1);
-                eta = perChunk * chunks.Count;
-            }
-            UpdateOp("Finishing…", 1.0, eta);
+            await Task.WhenAll(Enumerable.Range(0, chunks.Count).Select(TranscribeChunk));
+            UpdateOp("Finishing…", 1.0);
             if (duration > TimeSpan.Zero) PerfStats.ObserveTranscribe(duration, DateTime.Now - started);
-            return all;
+            return perChunk.SelectMany(x => x).ToList();
         }
         finally
         {
